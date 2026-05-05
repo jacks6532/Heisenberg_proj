@@ -23,17 +23,17 @@ on:
         type: string
         default: 'فایل دان/لود شده'
       password:
-        description: '🔐 رمز فایل فشرده (اختیاری)'
+        description: '🔐 رمز فایل فشرده (اختیاری - فقط برای فایل‌های غیر رسانه‌ای)'
         required: false
         type: string
         default: ''
       split_size_mb:
-        description: '📦 حجم هر تکه به مگابایت (حداکثر 95، پیش‌فرض: 95)'
+        description: '📦 حجم هر تکه به مگابایت (حداکثر 95، پیش‌فرض: 95) - فقط برای فایل‌های غیر رسانه‌ای بالای 100 مگابایت'
         required: false
         type: number
         default: 95
       compression_level:
-        description: '🎯 سطح فشرده‌سازی 7z (1=سریع، 9=حداکثر، پیش‌فرض: 9)'
+        description: '🎯 سطح فشرده‌سازی 7z (1=سریع، 9=حداکثر) - فقط برای فایل‌های غیر رسانه‌ای'
         required: false
         type: number
         default: 9
@@ -188,11 +188,30 @@ jobs:
             EXT="${FINAL_NAME##*.}"
             EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
             
-            # پردازش فایل بر اساس نوع
+            # تشخیص نوع فایل
+            IS_MEDIA=false
+            IS_MP3=false
+            
+            if [[ "$EXT" == "mp3" || "$MIME" == "audio/mpeg" ]]; then
+              IS_MEDIA=true
+              IS_MP3=true
+              echo "🎵 فایل MP3 شناسایی شد"
+            elif [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ || "$MIME" == video/* ]]; then
+              IS_MEDIA=true
+              echo "🎬 فایل ویدیویی شناسایی شد"
+            elif [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp|svg)$ || "$MIME" == image/* ]]; then
+              IS_MEDIA=true
+              echo "🖼️ فایل تصویری شناسایی شد"
+            elif [[ "$EXT" =~ ^(aac|wav|ogg|flac|m4a)$ || "$MIME" == audio/* ]]; then
+              IS_MEDIA=true
+              echo "🎵 فایل صوتی شناسایی شد"
+            fi
+            
+            # پردازش فایل
             PROCESSED_FILE="$FINAL_NAME"
             
-            # فشرده‌سازی MP3 با ffmpeg
-            if [[ "$EXT" == "mp3" || "$MIME" == "audio/mpeg" ]]; then
+            # 1. تبدیل MP3 با ffmpeg (اگر انتخاب شده باشد)
+            if [ "$IS_MP3" = true ]; then
               MP3_BITRATE="${{ steps.sanitize.outputs.mp3_bitrate }}"
               if [ "$MP3_BITRATE" != "none" ]; then
                 echo "🎵 تبدیل MP3 به بیت‌ریت $MP3_BITRATE..."
@@ -211,52 +230,58 @@ jobs:
               fi
             fi
             
-            # فشرده‌سازی نهایی با 7z
-            echo "🗜️ فشرده‌سازی فایل..."
-            
-            # نام فایل نهایی آرشیو
-            if [[ "$EXT" == "mp3" || "$MIME" == "audio/mpeg" ]]; then
-              BASE_NAME="${FINAL_NAME%.*}"
-              ARCHIVE_NAME="${BASE_NAME}_bitrate_${{ steps.sanitize.outputs.mp3_bitrate }}.7z"
+            # 2. تصمیم‌گیری برای فشرده‌سازی با 7z
+            if [ "$IS_MEDIA" = true ]; then
+              # فایل‌های رسانه‌ای: بدون فشرده‌سازی 7z (فقط کپی می‌شوند)
+              echo "📁 فایل رسانه‌ای → ذخیره بدون فشرده‌سازی (برای جلوگیری از زمان طولانی)"
+              
+              # بررسی وجود فایل تکراری
+              TARGET_NAME="$FINAL_NAME"
+              COUNTER=1
+              while [ -f "$FINAL_DIR/$TARGET_NAME" ]; do
+                BASE="${FINAL_NAME%.*}"
+                EXT="${FINAL_NAME##*.}"
+                TARGET_NAME="${BASE}_${COUNTER}.${EXT}"
+                COUNTER=$((COUNTER + 1))
+              done
+              
+              cp "$PROCESSED_FILE" "$FINAL_DIR/$TARGET_NAME"
+              echo "✅ ذخیره شد: $TARGET_NAME"
             else
+              # فایل‌های غیر رسانه‌ای: فشرده‌سازی با 7z
+              echo "🗜️ فایل غیر رسانه‌ای → فشرده‌سازی با 7z"
+              
               ARCHIVE_NAME="${FINAL_NAME}.7z"
-            fi
-            
-            # رفع تکراری بودن نام
-            COUNTER=1
-            while [ -f "$FINAL_DIR/$ARCHIVE_NAME" ]; do
-              if [[ "$EXT" == "mp3" || "$MIME" == "audio/mpeg" ]]; then
-                ARCHIVE_NAME="${BASE_NAME}_bitrate_${{ steps.sanitize.outputs.mp3_bitrate }}_${COUNTER}.7z"
-              else
+              COUNTER=1
+              while [ -f "$FINAL_DIR/$ARCHIVE_NAME" ]; do
                 BASE="${FINAL_NAME%.*}"
                 ARCHIVE_NAME="${BASE}_${COUNTER}.7z"
-              fi
-              COUNTER=$((COUNTER + 1))
-            done
-            
-            # فشرده‌سازی با 7z
-            if [ $FILE_SIZE -lt 104857600 ]; then
-              if [ -n "${{ github.event.inputs.password }}" ]; then
-                7z a -t7z -mx=${{ github.event.inputs.compression_level }} -mhe=on -p"${{ github.event.inputs.password }}" "$FINAL_DIR/$ARCHIVE_NAME" "./$PROCESSED_FILE" > /dev/null 2>&1
+                COUNTER=$((COUNTER + 1))
+              done
+              
+              if [ $FILE_SIZE -lt 104857600 ]; then
+                if [ -n "${{ github.event.inputs.password }}" ]; then
+                  7z a -t7z -mx=${{ github.event.inputs.compression_level }} -mhe=on -p"${{ github.event.inputs.password }}" "$FINAL_DIR/$ARCHIVE_NAME" "./$PROCESSED_FILE" > /dev/null 2>&1
+                else
+                  7z a -t7z -mx=${{ github.event.inputs.compression_level }} "$FINAL_DIR/$ARCHIVE_NAME" "./$PROCESSED_FILE" > /dev/null 2>&1
+                fi
               else
-                7z a -t7z -mx=${{ github.event.inputs.compression_level }} "$FINAL_DIR/$ARCHIVE_NAME" "./$PROCESSED_FILE" > /dev/null 2>&1
+                if [ -n "${{ github.event.inputs.password }}" ]; then
+                  7z a -t7z -mx=${{ github.event.inputs.compression_level }} -mhe=on -p"${{ github.event.inputs.password }}" -v${{ steps.sanitize.outputs.split_size }} "$FINAL_DIR/$ARCHIVE_NAME" "./$PROCESSED_FILE" > /dev/null 2>&1
+                else
+                  7z a -t7z -mx=${{ github.event.inputs.compression_level }} -v${{ steps.sanitize.outputs.split_size }} "$FINAL_DIR/$ARCHIVE_NAME" "./$PROCESSED_FILE" > /dev/null 2>&1
+                fi
               fi
-            else
-              if [ -n "${{ github.event.inputs.password }}" ]; then
-                7z a -t7z -mx=${{ github.event.inputs.compression_level }} -mhe=on -p"${{ github.event.inputs.password }}" -v${{ steps.sanitize.outputs.split_size }} "$FINAL_DIR/$ARCHIVE_NAME" "./$PROCESSED_FILE" > /dev/null 2>&1
+              
+              if [ $? -eq 0 ]; then
+                echo "✅ فشرده‌سازی کامل شد: $ARCHIVE_NAME"
               else
-                7z a -t7z -mx=${{ github.event.inputs.compression_level }} -v${{ steps.sanitize.outputs.split_size }} "$FINAL_DIR/$ARCHIVE_NAME" "./$PROCESSED_FILE" > /dev/null 2>&1
+                echo "⚠️ خطا در فشرده‌سازی، ذخیره فایل اصلی"
+                cp "$PROCESSED_FILE" "$FINAL_DIR/$FINAL_NAME"
               fi
             fi
             
-            if [ $? -eq 0 ]; then
-              echo "✅ فشرده‌سازی کامل شد: $ARCHIVE_NAME"
-            else
-              echo "⚠️ خطا در فشرده‌سازی، ذخیره فایل اصلی"
-              cp "./$PROCESSED_FILE" "$FINAL_DIR/$FINAL_NAME"
-            fi
-            
-            rm -f "$FINAL_NAME" "$PROCESSED_FILE"
+            rm -f "$FINAL_NAME" "$PROCESSED_FILE" 2>/dev/null
             
           done < /tmp/urls.txt
           
@@ -289,35 +314,28 @@ jobs:
             ## ℹ️ اطلاعات
             
             - **تاریخ دان/لود:** $CURRENT_DATE
-            - **سطح فشرده‌سازی 7z:** ${{ github.event.inputs.compression_level }}
             EOF
-            
-            if [ -n "${{ github.event.inputs.password }}" ]; then
-              echo "- **رمزگذاری:** فعال" >> "$FINAL_DIR/README.md"
-            else
-              echo "- **رمزگذاری:** غیرفعال" >> "$FINAL_DIR/README.md"
-            fi
             
             MP3_BITRATE="${{ steps.sanitize.outputs.mp3_bitrate }}"
             if [ "$MP3_BITRATE" != "none" ]; then
               echo "- **بیت‌ریت MP3:** $MP3_BITRATE" >> "$FINAL_DIR/README.md"
             fi
             
+            if [ -n "${{ github.event.inputs.password }}" ]; then
+              echo "- **رمزگذاری:** فعال (فقط برای فایل‌های غیر رسانه‌ای)" >> "$FINAL_DIR/README.md"
+            fi
+            
             cat >> "$FINAL_DIR/README.md" << 'EOF'
             
             ## 📂 نحوه استفاده
             
-            1. فایل‌های 7z را دان/لود کنید
-            2. با 7-Zip یا WinRAR استخراج کنید
+            1. فایل‌ها را دان/لود کنید
+            2. فایل‌های با پسوند .7z را با 7-Zip استخراج کنید
+            3. فایل‌های رسانه‌ای (MP3، MP4، تصاویر) بدون نیاز به استخراج قابل استفاده هستند
+            
+            ---
+            *تولید شده توسط GitHub Actions*
             EOF
-            
-            if [ -n "${{ github.event.inputs.password }}" ]; then
-              echo "3. رمز را وارد کنید" >> "$FINAL_DIR/README.md"
-            fi
-            
-            echo "" >> "$FINAL_DIR/README.md"
-            echo "---" >> "$FINAL_DIR/README.md"
-            echo "*تولید شده توسط GitHub Actions*" >> "$FINAL_DIR/README.md"
           fi
           
           echo "✅ README ساخته شد"
