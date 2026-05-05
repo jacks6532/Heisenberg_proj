@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       custom_dir_name:
-        description: '📁 نام دلخواه برای پوشه اصلی (اختیاری)'
+        description: '📁 نام دلخواه برای پوشه اصلی (اختیاری - در صورت وجود، فایل به همان پوشه اضافه می‌شود)'
         required: false
         type: string
         default: ''
@@ -21,7 +21,7 @@ on:
         description: '📝 توضیحات برای فایل README (اختیاری)'
         required: false
         type: string
-        default: ''
+        default: 'فایل دان/لود شده توسط Down/loader حرفه‌ای'
       password:
         description: '🔐 رمز فایل فشرده (اختیاری)'
         required: false
@@ -71,7 +71,8 @@ jobs:
             curl \
             file \
             coreutils \
-            parallel
+            parallel \
+            python3
 
       - name: 🔐 تنظیم متغیرهای امن و پالایش ورودی
         id: sanitize
@@ -92,6 +93,13 @@ jobs:
           fi
           echo "safe_dir_name=$SAFE_DIR_NAME" >> $GITHUB_OUTPUT
           
+          # بررسی وجود پوشه در مخزن
+          if [ -d "$SAFE_DIR_NAME" ]; then
+            echo "📁 پوشه '$SAFE_DIR_NAME' از قبل وجود دارد → فایل جدید به همان پوشه اضافه می‌شود"
+          else
+            echo "📁 پوشه جدید '$SAFE_DIR_NAME' ساخته می‌شود"
+          fi
+          
           # ساخت نام فایل امن
           if [ -n "${{ github.event.inputs.custom_filename }}" ]; then
             SAFE_FILENAME=$(echo "${{ github.event.inputs.custom_filename }}" | sed 's/[\\/:*?"<>|]/_/g' | sed 's/ //g')
@@ -111,9 +119,17 @@ jobs:
       - name: 📥 پردازش و دان/لود فایل‌ها با نمایش پیشرفت
         id: process
         run: |
-          # ایجاد دایرکتوری اصلی
+          # استفاده از نام پوشه (همان پوشه قبلی اگر وجود داشته باشد)
           FINAL_DIR="${{ steps.sanitize.outputs.safe_dir_name }}"
+          
+          # ایجاد پوشه اگر وجود نداشته باشد
           mkdir -p "$FINAL_DIR"
+          
+          # پشتیبان‌گیری از فایل README قبلی (اگر وجود داشته باشد)
+          if [ -f "$FINAL_DIR/README.md" ]; then
+            cp "$FINAL_DIR/README.md" /tmp/old_readme.md
+            echo "📝 فایل README قبلی پشتیبان گرفته شد"
+          fi
           
           # ساخت آرایه از URLها
           echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' > /tmp/urls.txt
@@ -143,7 +159,8 @@ jobs:
               ORIGINAL_FILENAME="downloaded_file_$(date +%s)"
             fi
             
-            if [ -n "${{ steps.sanitize.outputs.safe_filename }}" ] && [ $CURRENT -eq 1 ]; then
+            # بررسی نام دلخواه فایل
+            if [ -n "${{ steps.sanitize.outputs.safe_filename }}" ]; then
               EXT="${ORIGINAL_FILENAME##*.}"
               if [ "$EXT" != "$ORIGINAL_FILENAME" ]; then
                 FINAL_FILENAME="${{ steps.sanitize.outputs.safe_filename }}.$EXT"
@@ -152,6 +169,19 @@ jobs:
               fi
             else
               FINAL_FILENAME="$ORIGINAL_FILENAME"
+            fi
+            
+            # اگر فایل با همین نام از قبل در پوشه وجود دارد، زمان فعلی را به آن اضافه کن
+            if [ -f "$FINAL_DIR/$FINAL_FILENAME" ]; then
+              BASE_NAME="${FINAL_FILENAME%.*}"
+              EXTENSION="${FINAL_FILENAME##*.}"
+              TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
+              if [ "$EXTENSION" != "$FINAL_FILENAME" ]; then
+                FINAL_FILENAME="${BASE_NAME}_${TIMESTAMP}.${EXTENSION}"
+              else
+                FINAL_FILENAME="${BASE_NAME}_${TIMESTAMP}"
+              fi
+              echo "⚠️ فایل تکراری → نام جدید: $FINAL_FILENAME"
             fi
             
             # پشتیبانی از نام فارسی
@@ -187,8 +217,15 @@ jobs:
             MIME=$(file -b --mime-type "$FINAL_FILENAME")
             echo "نوع فایل: $MIME"
             
-            # *** شرط اصلی: بررسی حجم برای تصمیم‌گیری در مورد اسپلیت کردن ***
-            # اگر حجم فایل کمتر از 100 مگابایت باشد (104857600 بایت)، بدون اسپلیت فشرده کن
+            # نام فایل فشرده نهایی (با توجه به فایل‌های قبلی)
+            ARCHIVE_NAME="archive"
+            COUNTER=1
+            while [ -f "$FINAL_DIR/${ARCHIVE_NAME}.7z" ] || [ -f "$FINAL_DIR/${ARCHIVE_NAME}.7z.001" ]; do
+              ARCHIVE_NAME="archive_${COUNTER}"
+              COUNTER=$((COUNTER + 1))
+            done
+            
+            # فشرده‌سازی با شرط حجم
             if [ $FILE_SIZE -lt 104857600 ]; then
               echo "🗜️ فایل کمتر از 100 مگابایت است → فشرده‌سازی بدون اسپلیت (Single file)"
               
@@ -200,17 +237,17 @@ jobs:
                   -ms=on \
                   -mhe=on \
                   -p"${{ github.event.inputs.password }}" \
-                  "$FINAL_DIR/archive.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+                  "$FINAL_DIR/${ARCHIVE_NAME}.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
               else
                 7z a -t7z \
                   -m0=lzma2 \
                   -mx=${{ github.event.inputs.compression_level }} \
                   -mmt=on \
                   -ms=on \
-                  "$FINAL_DIR/archive.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+                  "$FINAL_DIR/${ARCHIVE_NAME}.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
               fi
             else
-              echo "🗜️ فایل 100 مگابایت یا بیشتر است → فشرده‌سازی با اسپلیت (تکه‌های ${SPLIT_SIZE}MB)"
+              echo "🗜️ فایل 100 مگابایت یا بیشتر است → فشرده‌سازی با اسپلیت (تکه‌های ${{ steps.sanitize.outputs.split_size }})"
               
               if [ -n "${{ github.event.inputs.password }}" ]; then
                 7z a -t7z \
@@ -221,7 +258,7 @@ jobs:
                   -mhe=on \
                   -p"${{ github.event.inputs.password }}" \
                   -v${{ steps.sanitize.outputs.split_size }} \
-                  "$FINAL_DIR/archive.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+                  "$FINAL_DIR/${ARCHIVE_NAME}.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
               else
                 7z a -t7z \
                   -m0=lzma2 \
@@ -229,17 +266,17 @@ jobs:
                   -mmt=on \
                   -ms=on \
                   -v${{ steps.sanitize.outputs.split_size }} \
-                  "$FINAL_DIR/archive.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+                  "$FINAL_DIR/${ARCHIVE_NAME}.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
               fi
             fi
-            # *******************************************
             
             if [ $? -eq 0 ]; then
               COMPRESSED_SIZE=$(du -sh "$FINAL_DIR" | cut -f1)
               echo "✅ فشرده‌سازی کامل شد (حجم نهایی: $COMPRESSED_SIZE)"
+              echo "📦 فایل فشرده: ${ARCHIVE_NAME}.7z"
             else
               echo "⚠️ خطا در فشرده‌سازی، ادامه با فایل اصلی"
-              cp "./$FINAL_FILENAME" "$FINAL_DIR/"
+              cp "./$FINAL_FILENAME" "$FINAL_DIR/${ARCHIVE_NAME}_original.$EXT"
             fi
             
             rm -f "$FINAL_FILENAME"
@@ -249,40 +286,66 @@ jobs:
           echo "🎉 همه عملیات با موفقیت انجام شد!"
           echo "final_dir=$FINAL_DIR" >> $GITHUB_OUTPUT
 
-      - name: 📝 ساخت README.md خودکار برای پوشه
+      - name: 📝 ساخت/به‌روزرسانی README.md برای پوشه
         run: |
           FINAL_DIR="${{ steps.process.outputs.final_dir }}"
           
-          cat > "$FINAL_DIR/README.md" << 'EOF'
-
+          # اگر README قبلی وجود داشت، توضیحات جدید را به آن اضافه کن
+          if [ -f "$FINAL_DIR/README.md" ]; then
+            echo "📝 به‌روزرسانی README موجود..."
+            echo "" >> "$FINAL_DIR/README.md"
+            echo "---" >> "$FINAL_DIR/README.md"
+            echo "" >> "$FINAL_DIR/README.md"
+            echo "## 📥 اضافه شده در تاریخ $(date +'%Y-%m-%d %H:%M:%S')" >> "$FINAL_DIR/README.md"
+            echo "" >> "$FINAL_DIR/README.md"
+            echo "${{ github.event.inputs.description_text }}" >> "$FINAL_DIR/README.md"
+            echo "" >> "$FINAL_DIR/README.md"
+            echo "**لینک(های) دان/لود شده:**" >> "$FINAL_DIR/README.md"
+            echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | while read url; do
+              echo "- $url" >> "$FINAL_DIR/README.md"
+            done
+          else
+            # ساخت README جدید
+            cat > "$FINAL_DIR/README.md" << 'EOF'
+            # 📦 فایل‌های دان/لود شده توسط Down/loader حرفه‌ای
+            
+            **${{ github.event.inputs.description_text }}**
+            
+            ## ℹ️ اطلاعات اولین دان/لود
+            
+            - **تاریخ دان/لود:** $(date +'%Y-%m-%d %H:%M:%S')
+            - **توسط اکشن:** ${{ github.workflow }}
+            - **از مخزن:** ${{ github.repository }}
+            
+            ## 🔐 جزئیات فشرده‌سازی
+            
+            - **روش فشرده‌سازی:** 7-Zip با حداکثر فشردگی (LZMA2)
+            - **سطح فشرده‌سازی:** ${{ github.event.inputs.compression_level }}
+            - **حجم هر تکه:** ${{ github.event.inputs.split_size_mb }} MB
+            - **رمزگذاری:** $(if [ -n "${{ github.event.inputs.password }}" ]; then echo "فعال (رمز مورد نیاز)"; else echo "غیرفعال"; fi)
+            
+            ## 🔗 لینک‌های دان/لود شده
+            
+            EOF
+            echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | while read url; do
+              echo "- $url" >> "$FINAL_DIR/README.md"
+            done
+            
+            cat >> "$FINAL_DIR/README.md" << 'EOF'
+            
+            ## 📂 نحوه استفاده
+            
+            1. فایل‌های با پسوند `.7z` یا `.7z.001`، `.7z.002` و ... را دان/لود کنید
+            2. با نرم‌افزارهای استخراج مثل WinRAR یا 7-Zip، فایل اول را باز کنید
+            3. $(if [ -n "${{ github.event.inputs.password }}" ]; then echo "رمز فشرده را وارد کنید"; fi)
+            4. فایل نهایی را استخراج کنید
+            
+            ---
+            *این پوشه به صورت خودکار توسط GitHub Actions مدیریت می‌شود*
+            EOF
+          fi
           
-          **${{ github.event.inputs.description_text }}**
-          
-          ## ℹ️ اطلاعات دان/لود
-          
-          - **تاریخ دان/لود:** $(date +'%Y-%m-%d %H:%M:%S')
-          - **توسط اکشن:** ${{ github.workflow }}
-          - **از مخزن:** ${{ github.repository }}
-          
-          ## 🔐 جزئیات فایل
-          
-          - **روش فشرده‌سازی:** 7-Zip با حداکثر فشردگی (LZMA2)
-          - **سطح فشرده‌سازی:** ${{ github.event.inputs.compression_level }}
-          - **حجم هر تکه:** ${{ github.event.inputs.split_size_mb }} MB
-          - **رمزگذاری:** $(if [ -n "${{ github.event.inputs.password }}" ]; then echo "فعال (رمز مورد نیاز)"; else echo "غیرفعال"; fi)
-          
-          ## 📂 نحوه استفاده
-          
-          1. تمام فایل‌های با پسوند `.7z.001`، `.7z.002` و ... را دان/لود کنید (اگر فایل کمتر از 100 مگابایت بود، فقط یک فایل .7z وجود دارد)
-          2. با نرم‌افزارهای استخراج مثل WinRAR یا 7-Zip، فایل اول (archive.7z.001 یا archive.7z) را باز کنید
-          3. $(if [ -n "${{ github.event.inputs.password }}" ]; then echo "رمز فشرده را وارد کنید"; fi)
-          4. فایل نهایی را استخراج کنید
-          
-          ---
-          *این فایل به صورت خودکار توسط GitHub Actions ساخته شده است*
-          EOF
-          
-          echo "✅ فایل README ساخته شد"
+          echo "✅ فایل README به‌روزرسانی شد"
 
       - name: 📤 کامیت و پوش به مخزن
         run: |
@@ -315,4 +378,9 @@ jobs:
           echo "📁 پوشه نهایی: ${{ steps.process.outputs.final_dir }}"
           echo "📊 حجم نهایی: $(du -sh ${{ steps.process.outputs.final_dir }} | cut -f1)"
           echo "🔢 تعداد فایل‌ها: $(find ${{ steps.process.outputs.final_dir }} -type f | wc -l)"
+          echo "========================================="
+          echo "💾 برای دان/لود فایل‌ها:"
+          echo "  → روی دکمه Code کلیک کنید"
+          echo "  → گزینه Download ZIP را بزنید"
+          echo "  → فایل‌های استخراج شده در پوشه ${{ steps.process.outputs.final_dir }} قرار دارند"
           echo "========================================="
