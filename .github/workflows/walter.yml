@@ -1,4 +1,4 @@
-name: '🚀 نسخه حرفه‌ای: دانلود، فشرده‌سازی و ذخیره در مخزن'
+name: '🚀 نسخه حرفه‌ای: دان/لود، فشرده‌سازی و ذخیره در مخزن'
 
 on:
   workflow_dispatch:
@@ -21,14 +21,14 @@ on:
         description: '📝 توضیحات برای فایل README (اختیاری)'
         required: false
         type: string
-        default: 'فایل دانلود شده توسط IR-Downloader حرفه‌ای'
+        default: ''
       password:
         description: '🔐 رمز فایل فشرده (اختیاری)'
         required: false
         type: string
         default: ''
       split_size_mb:
-        description: '📦 حجم هر تکه به مگابایت (حداکثر 95، پیش‌فرض: 95)'
+        description: '📦 حجم هر تکه به مگابایت (حداکثر 95، پیش‌فرض: 95) - فقط برای فایل‌های بالای 100 مگابایت'
         required: false
         type: number
         default: 95
@@ -108,7 +108,7 @@ jobs:
           fi
           echo "split_size=${SPLIT_SIZE}m" >> $GITHUB_OUTPUT
 
-      - name: 📥 پردازش و دانلود فایل‌ها با نمایش پیشرفت
+      - name: 📥 پردازش و دان/لود فایل‌ها با نمایش پیشرفت
         id: process
         run: |
           # ایجاد دایرکتوری اصلی
@@ -134,7 +134,7 @@ jobs:
             CURRENT=$((CURRENT + 1))
             
             echo "========================================="
-            echo "📥 [$CURRENT/$TOTAL_URLS] شروع دانلود: $URL"
+            echo "📥 [$CURRENT/$TOTAL_URLS] شروع دان/لود: $URL"
             
             # استخراج نام فایل از لینک با پشتیبانی از UTF-8
             ORIGINAL_FILENAME=$(basename "$URL" | sed 's/\?.*//' | python3 -c "import sys; from urllib.parse import unquote; print(unquote(sys.stdin.read()))" 2>/dev/null || basename "$URL" | sed 's/\?.*//')
@@ -160,7 +160,7 @@ jobs:
             
             echo "نام فایل: $FINAL_FILENAME"
             
-            # دانلود با نمایش پیشرفت
+            # دان/لود با نمایش پیشرفت
             curl -L --fail --retry 5 --retry-delay 3 --retry-max-time 60 \
               --progress-bar \
               --user-agent "${{ github.event.inputs.user_agent }}" \
@@ -170,11 +170,11 @@ jobs:
               "$URL"
             
             if [ $? -ne 0 ]; then
-              echo "❌ خطا در دانلود: $URL → ادامه به لینک بعدی"
+              echo "❌ خطا در دان/لود: $URL → ادامه به لینک بعدی"
               continue
             fi
             
-            # چک کردن حجم فایل
+            # چک کردن حجم فایل (بر حسب بایت)
             FILE_SIZE=$(stat -c%s "$FINAL_FILENAME" 2>/dev/null || stat -f%z "$FINAL_FILENAME" 2>/dev/null)
             FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
             echo "✅ دریافت شد: $FINAL_FILENAME (حجم: $FILE_SIZE_MB MB)"
@@ -187,28 +187,52 @@ jobs:
             MIME=$(file -b --mime-type "$FINAL_FILENAME")
             echo "نوع فایل: $MIME"
             
-            # فشرده‌سازی پیشرفته
-            echo "🗜️ در حال فشرده‌سازی با حداکثر کیفیت..."
-            
-            if [ -n "${{ github.event.inputs.password }}" ]; then
-              7z a -t7z \
-                -m0=lzma2 \
-                -mx=${{ github.event.inputs.compression_level }} \
-                -mmt=on \
-                -ms=on \
-                -mhe=on \
-                -p"${{ github.event.inputs.password }}" \
-                -v${{ steps.sanitize.outputs.split_size }} \
-                "$FINAL_DIR/archive.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+            # *** شرط اصلی: بررسی حجم برای تصمیم‌گیری در مورد اسپلیت کردن ***
+            # اگر حجم فایل کمتر از 100 مگابایت باشد (104857600 بایت)، بدون اسپلیت فشرده کن
+            if [ $FILE_SIZE -lt 104857600 ]; then
+              echo "🗜️ فایل کمتر از 100 مگابایت است → فشرده‌سازی بدون اسپلیت (Single file)"
+              
+              if [ -n "${{ github.event.inputs.password }}" ]; then
+                7z a -t7z \
+                  -m0=lzma2 \
+                  -mx=${{ github.event.inputs.compression_level }} \
+                  -mmt=on \
+                  -ms=on \
+                  -mhe=on \
+                  -p"${{ github.event.inputs.password }}" \
+                  "$FINAL_DIR/archive.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+              else
+                7z a -t7z \
+                  -m0=lzma2 \
+                  -mx=${{ github.event.inputs.compression_level }} \
+                  -mmt=on \
+                  -ms=on \
+                  "$FINAL_DIR/archive.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+              fi
             else
-              7z a -t7z \
-                -m0=lzma2 \
-                -mx=${{ github.event.inputs.compression_level }} \
-                -mmt=on \
-                -ms=on \
-                -v${{ steps.sanitize.outputs.split_size }} \
-                "$FINAL_DIR/archive.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+              echo "🗜️ فایل 100 مگابایت یا بیشتر است → فشرده‌سازی با اسپلیت (تکه‌های ${SPLIT_SIZE}MB)"
+              
+              if [ -n "${{ github.event.inputs.password }}" ]; then
+                7z a -t7z \
+                  -m0=lzma2 \
+                  -mx=${{ github.event.inputs.compression_level }} \
+                  -mmt=on \
+                  -ms=on \
+                  -mhe=on \
+                  -p"${{ github.event.inputs.password }}" \
+                  -v${{ steps.sanitize.outputs.split_size }} \
+                  "$FINAL_DIR/archive.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+              else
+                7z a -t7z \
+                  -m0=lzma2 \
+                  -mx=${{ github.event.inputs.compression_level }} \
+                  -mmt=on \
+                  -ms=on \
+                  -v${{ steps.sanitize.outputs.split_size }} \
+                  "$FINAL_DIR/archive.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+              fi
             fi
+            # *******************************************
             
             if [ $? -eq 0 ]; then
               COMPRESSED_SIZE=$(du -sh "$FINAL_DIR" | cut -f1)
@@ -230,13 +254,13 @@ jobs:
           FINAL_DIR="${{ steps.process.outputs.final_dir }}"
           
           cat > "$FINAL_DIR/README.md" << 'EOF'
-          # 📦 فایل دانلود شده توسط IR-Downloader حرفه‌ای
+
           
           **${{ github.event.inputs.description_text }}**
           
-          ## ℹ️ اطلاعات دانلود
+          ## ℹ️ اطلاعات دان/لود
           
-          - **تاریخ دانلود:** $(date +'%Y-%m-%d %H:%M:%S')
+          - **تاریخ دان/لود:** $(date +'%Y-%m-%d %H:%M:%S')
           - **توسط اکشن:** ${{ github.workflow }}
           - **از مخزن:** ${{ github.repository }}
           
@@ -249,8 +273,8 @@ jobs:
           
           ## 📂 نحوه استفاده
           
-          1. تمام فایل‌های با پسوند `.7z.001`، `.7z.002` و ... را دانلود کنید
-          2. با نرم‌افزارهای استخراج مثل WinRAR یا 7-Zip، فایل اول (archive.7z.001) را باز کنید
+          1. تمام فایل‌های با پسوند `.7z.001`، `.7z.002` و ... را دان/لود کنید (اگر فایل کمتر از 100 مگابایت بود، فقط یک فایل .7z وجود دارد)
+          2. با نرم‌افزارهای استخراج مثل WinRAR یا 7-Zip، فایل اول (archive.7z.001 یا archive.7z) را باز کنید
           3. $(if [ -n "${{ github.event.inputs.password }}" ]; then echo "رمز فشرده را وارد کنید"; fi)
           4. فایل نهایی را استخراج کنید
           
@@ -271,12 +295,12 @@ jobs:
           git add "${{ steps.process.outputs.final_dir }}/"
           git add README.md 2>/dev/null || true
           
-          git commit -m "➕ افزودن فایل دانلود شده: ${{ steps.sanitize.outputs.safe_dir_name }}
+          git commit -m "➕ افزودن فایل دان/لود شده: ${{ steps.sanitize.outputs.safe_dir_name }}
           
           توضیحات: ${{ github.event.inputs.description_text }}
           حجم فشرده: $(du -sh ${{ steps.process.outputs.final_dir }} | cut -f1)
           
-          دانلود شده توسط GitHub Actions
+          دان/لود شده توسط GitHub Actions
           " || echo "📝 هیچ فایل جدیدی برای کامیت وجود ندارد"
           
           git push --force-with-lease origin main || git push --force-with-lease origin master
@@ -286,7 +310,7 @@ jobs:
       - name: 📊 گزارش نهایی
         run: |
           echo "========================================="
-          echo "🎉 فرآیند دانلود با موفقیت کامل شد!"
+          echo "🎉 فرآیند دان/لود با موفقیت کامل شد!"
           echo "========================================="
           echo "📁 پوشه نهایی: ${{ steps.process.outputs.final_dir }}"
           echo "📊 حجم نهایی: $(du -sh ${{ steps.process.outputs.final_dir }} | cut -f1)"
