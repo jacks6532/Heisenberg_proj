@@ -56,7 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 🔄 دریافت کد مخزن
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: ⚙️ نصب ابزارهای پیشرفته
         run: |
@@ -290,62 +290,90 @@ jobs:
         run: |
           FINAL_DIR="${{ steps.process.outputs.final_dir }}"
           
+          # اطمینان از وجود پوشه نهایی
+          if [ ! -d "$FINAL_DIR" ]; then
+            echo "❌ خطا: پوشه $FINAL_DIR وجود ندارد!"
+            exit 1
+          fi
+          
+          # تاریخ فعلی برای استفاده در README
+          CURRENT_DATE=$(date +'%Y-%m-%d %H:%M:%S')
+          
           # اگر README قبلی وجود داشت، توضیحات جدید را به آن اضافه کن
           if [ -f "$FINAL_DIR/README.md" ]; then
             echo "📝 به‌روزرسانی README موجود..."
-            echo "" >> "$FINAL_DIR/README.md"
-            echo "---" >> "$FINAL_DIR/README.md"
-            echo "" >> "$FINAL_DIR/README.md"
-            echo "## 📥 اضافه شده در تاریخ $(date +'%Y-%m-%d %H:%M:%S')" >> "$FINAL_DIR/README.md"
-            echo "" >> "$FINAL_DIR/README.md"
-            echo "${{ github.event.inputs.description_text }}" >> "$FINAL_DIR/README.md"
-            echo "" >> "$FINAL_DIR/README.md"
-            echo "**لینک(های) دان/لود شده:**" >> "$FINAL_DIR/README.md"
-            echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | while read url; do
-              echo "- $url" >> "$FINAL_DIR/README.md"
-            done
+            
+            # اضافه کردن جداکننده و توضیحات جدید
+            {
+              echo ""
+              echo "---"
+              echo ""
+              echo "## 📥 اضافه شده در تاریخ $CURRENT_DATE"
+              echo ""
+              echo "${{ github.event.inputs.description_text }}"
+              echo ""
+              echo "**لینک(های) دان/لود شده:**"
+              echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | while read url; do
+                echo "- $url"
+              done
+            } >> "$FINAL_DIR/README.md"
+            
           else
-            # ساخت README جدید
-            cat > "$FINAL_DIR/README.md" << 'EOF'
-            # 📦 فایل‌های دان/لود شده توسط Down/loader حرفه‌ای
+            # ساخت README جدید با استفاده از روش مطمئن‌تر
+            echo "📝 ساخت README جدید..."
             
-            **${{ github.event.inputs.description_text }}**
+            {
+              echo "# 📦 فایل‌های دان/لود شده توسط Down/loader حرفه‌ای"
+              echo ""
+              echo "**${{ github.event.inputs.description_text }}**"
+              echo ""
+              echo "## ℹ️ اطلاعات اولین دان/لود"
+              echo ""
+              echo "- **تاریخ دان/لود:** $CURRENT_DATE"
+              echo "- **توسط اکشن:** ${{ github.workflow }}"
+              echo "- **از مخزن:** ${{ github.repository }}"
+              echo ""
+              echo "## 🔐 جزئیات فشرده‌سازی"
+              echo ""
+              echo "- **روش فشرده‌سازی:** 7-Zip با حداکثر فشردگی (LZMA2)"
+              echo "- **سطح فشرده‌سازی:** ${{ github.event.inputs.compression_level }}"
+              echo "- **حجم هر تکه:** ${{ github.event.inputs.split_size_mb }} MB"
+              if [ -n "${{ github.event.inputs.password }}" ]; then
+                echo "- **رمزگذاری:** فعال (رمز مورد نیاز)"
+              else
+                echo "- **رمزگذاری:** غیرفعال"
+              fi
+              echo ""
+              echo "## 🔗 لینک‌های دان/لود شده"
+              echo ""
+              echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | while read url; do
+                echo "- $url"
+              done
+              echo ""
+              echo "## 📂 نحوه استفاده"
+              echo ""
+              echo "1. فایل‌های با پسوند \`.7z\` یا \`.7z.001\`، \`.7z.002\` و ... را دان/لود کنید"
+              echo "2. با نرم‌افزارهای استخراج مثل WinRAR یا 7-Zip، فایل اول را باز کنید"
+              if [ -n "${{ github.event.inputs.password }}" ]; then
+                echo "3. رمز فشرده را وارد کنید"
+                echo "4. فایل نهایی را استخراج کنید"
+              else
+                echo "3. فایل نهایی را استخراج کنید"
+              fi
+              echo ""
+              echo "---"
+              echo "*این پوشه به صورت خودکار توسط GitHub Actions مدیریت می‌شود*"
+            } > "$FINAL_DIR/README.md"
             
-            ## ℹ️ اطلاعات اولین دان/لود
-            
-            - **تاریخ دان/لود:** $(date +'%Y-%m-%d %H:%M:%S')
-            - **توسط اکشن:** ${{ github.workflow }}
-            - **از مخزن:** ${{ github.repository }}
-            
-            ## 🔐 جزئیات فشرده‌سازی
-            
-            - **روش فشرده‌سازی:** 7-Zip با حداکثر فشردگی (LZMA2)
-            - **سطح فشرده‌سازی:** ${{ github.event.inputs.compression_level }}
-            - **حجم هر تکه:** ${{ github.event.inputs.split_size_mb }} MB
-            - **رمزگذاری:** $(if [ -n "${{ github.event.inputs.password }}" ]; then echo "فعال (رمز مورد نیاز)"; else echo "غیرفعال"; fi)
-            
-            ## 🔗 لینک‌های دان/لود شده
-            
-            EOF
-            echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | while read url; do
-              echo "- $url" >> "$FINAL_DIR/README.md"
-            done
-            
-            cat >> "$FINAL_DIR/README.md" << 'EOF'
-            
-            ## 📂 نحوه استفاده
-            
-            1. فایل‌های با پسوند `.7z` یا `.7z.001`، `.7z.002` و ... را دان/لود کنید
-            2. با نرم‌افزارهای استخراج مثل WinRAR یا 7-Zip، فایل اول را باز کنید
-            3. $(if [ -n "${{ github.event.inputs.password }}" ]; then echo "رمز فشرده را وارد کنید"; fi)
-            4. فایل نهایی را استخراج کنید
-            
-            ---
-            *این پوشه به صورت خودکار توسط GitHub Actions مدیریت می‌شود*
-            EOF
           fi
           
-          echo "✅ فایل README به‌روزرسانی شد"
+          # تأیید ایجاد فایل
+          if [ -f "$FINAL_DIR/README.md" ]; then
+            echo "✅ فایل README با موفقیت در $FINAL_DIR/README.md ایجاد/به‌روزرسانی شد"
+          else
+            echo "❌ خطا: فایل README ساخته نشد!"
+            exit 1
+          fi
 
       - name: 📤 کامیت و پوش به مخزن
         run: |
