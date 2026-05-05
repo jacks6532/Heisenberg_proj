@@ -232,10 +232,9 @@ jobs:
             
             # 2. تصمیم‌گیری برای فشرده‌سازی با 7z
             if [ "$IS_MEDIA" = true ]; then
-              # فایل‌های رسانه‌ای: بدون فشرده‌سازی 7z (فقط کپی می‌شوند)
-              echo "📁 فایل رسانه‌ای → ذخیره بدون فشرده‌سازی (برای جلوگیری از زمان طولانی)"
+              # فایل‌های رسانه‌ای: بدون فشرده‌سازی 7z
+              echo "📁 فایل رسانه‌ای → ذخیره بدون فشرده‌سازی"
               
-              # بررسی وجود فایل تکراری
               TARGET_NAME="$FINAL_NAME"
               COUNTER=1
               while [ -f "$FINAL_DIR/$TARGET_NAME" ]; do
@@ -292,53 +291,53 @@ jobs:
           FINAL_DIR="${{ steps.process.outputs.final_dir }}"
           
           if [ ! -d "$FINAL_DIR" ]; then
-            echo "❌ خطا: پوشه وجود ندارد"
+            echo "❌ خطا: پوشه $FINAL_DIR وجود ندارد"
             exit 1
           fi
           
           CURRENT_DATE=$(date +'%Y-%m-%d %H:%M:%S')
+          MP3_BITRATE="${{ steps.sanitize.outputs.mp3_bitrate }}"
+          PASSWORD_SET="${{ github.event.inputs.password }}"
+          DESCRIPTION="${{ github.event.inputs.description_text }}"
           
-          if [ -f "$FINAL_DIR/README.md" ]; then
-            echo "" >> "$FINAL_DIR/README.md"
-            echo "---" >> "$FINAL_DIR/README.md"
-            echo "" >> "$FINAL_DIR/README.md"
-            echo "## 📥 اضافه شده در تاریخ $CURRENT_DATE" >> "$FINAL_DIR/README.md"
-            echo "" >> "$FINAL_DIR/README.md"
-            echo "${{ github.event.inputs.description_text }}" >> "$FINAL_DIR/README.md"
-          else
-            cat > "$FINAL_DIR/README.md" << 'EOF'
-            # 📦 فایل‌های دان/لود شده
-            
-            **${{ github.event.inputs.description_text }}**
-            
-            ## ℹ️ اطلاعات
-            
-            - **تاریخ دان/لود:** $CURRENT_DATE
-            EOF
-            
-            MP3_BITRATE="${{ steps.sanitize.outputs.mp3_bitrate }}"
-            if [ "$MP3_BITRATE" != "none" ]; then
-              echo "- **بیت‌ریت MP3:** $MP3_BITRATE" >> "$FINAL_DIR/README.md"
-            fi
-            
-            if [ -n "${{ github.event.inputs.password }}" ]; then
-              echo "- **رمزگذاری:** فعال (فقط برای فایل‌های غیر رسانه‌ای)" >> "$FINAL_DIR/README.md"
-            fi
-            
-            cat >> "$FINAL_DIR/README.md" << 'EOF'
-            
-            ## 📂 نحوه استفاده
-            
-            1. فایل‌ها را دان/لود کنید
-            2. فایل‌های با پسوند .7z را با 7-Zip استخراج کنید
-            3. فایل‌های رسانه‌ای (MP3، MP4، تصاویر) بدون نیاز به استخراج قابل استفاده هستند
-            
-            ---
-            *تولید شده توسط GitHub Actions*
-            EOF
+          # ساخت فایل README با روش echo
+          echo "# 📦 فایل‌های دان/لود شده" > "$FINAL_DIR/README.md"
+          echo "" >> "$FINAL_DIR/README.md"
+          echo "**${DESCRIPTION}**" >> "$FINAL_DIR/README.md"
+          echo "" >> "$FINAL_DIR/README.md"
+          echo "## ℹ️ اطلاعات" >> "$FINAL_DIR/README.md"
+          echo "" >> "$FINAL_DIR/README.md"
+          echo "- **تاریخ دان/لود:** ${CURRENT_DATE}" >> "$FINAL_DIR/README.md"
+          echo "- **سطح فشرده‌سازی 7z:** ${{ github.event.inputs.compression_level }}" >> "$FINAL_DIR/README.md"
+          
+          if [ "$MP3_BITRATE" != "none" ]; then
+            echo "- **بیت‌ریت MP3:** ${MP3_BITRATE}" >> "$FINAL_DIR/README.md"
           fi
           
-          echo "✅ README ساخته شد"
+          if [ -n "$PASSWORD_SET" ]; then
+            echo "- **رمزگذاری:** فعال (فقط برای فایل‌های غیر رسانه‌ای)" >> "$FINAL_DIR/README.md"
+          else
+            echo "- **رمزگذاری:** غیرفعال" >> "$FINAL_DIR/README.md"
+          fi
+          
+          echo "" >> "$FINAL_DIR/README.md"
+          echo "## 📂 نحوه استفاده" >> "$FINAL_DIR/README.md"
+          echo "" >> "$FINAL_DIR/README.md"
+          echo "1. فایل‌ها را دان/لود کنید" >> "$FINAL_DIR/README.md"
+          echo "2. فایل‌های با پسوند .7z را با 7-Zip استخراج کنید" >> "$FINAL_DIR/README.md"
+          echo "3. فایل‌های رسانه‌ای (MP3، MP4، تصاویر) بدون نیاز به استخراج قابل استفاده هستند" >> "$FINAL_DIR/README.md"
+          echo "" >> "$FINAL_DIR/README.md"
+          echo "---" >> "$FINAL_DIR/README.md"
+          echo "*تولید شده توسط GitHub Actions*" >> "$FINAL_DIR/README.md"
+          
+          # بررسی ایجاد فایل
+          if [ -f "$FINAL_DIR/README.md" ]; then
+            echo "✅ README ساخته شد در $FINAL_DIR/README.md"
+            cat "$FINAL_DIR/README.md"
+          else
+            echo "❌ خطا: README ساخته نشد"
+            exit 1
+          fi
 
       - name: کامیت و انتشار
         run: |
