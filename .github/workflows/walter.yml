@@ -1,4 +1,4 @@
-name: '🚀 نسخه حرفه‌ای: دان/لود، فشرده‌سازی و ذخیره در مخزن'
+name: '🚀 دان/لود، فشرده‌سازی و ذخیره در مخزن'
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       custom_dir_name:
-        description: '📁 نام دلخواه برای پوشه اصلی (اختیاری - در صورت وجود، فایل به همان پوشه اضافه می‌شود)'
+        description: '📁 نام دلخواه برای پوشه اصلی (اختیاری)'
         required: false
         type: string
         default: ''
@@ -21,24 +21,29 @@ on:
         description: '📝 توضیحات برای فایل README (اختیاری)'
         required: false
         type: string
-        default: 'فایل دان/لود شده توسط Down/loader حرفه‌ای'
+        default: 'فایل دان/لود شده'
       password:
         description: '🔐 رمز فایل فشرده (اختیاری)'
         required: false
         type: string
         default: ''
       split_size_mb:
-        description: '📦 حجم هر تکه به مگابایت (حداکثر 95، پیش‌فرض: 95) - فقط برای فایل‌های بالای 100 مگابایت'
+        description: '📦 حجم هر تکه به مگابایت (حداکثر 95، پیش‌فرض: 95)'
         required: false
         type: number
         default: 95
       compression_level:
-        description: '🎯 سطح فشرده‌سازی (1=سریع، 9=حداکثر، پیش‌فرض: 9)'
+        description: '🎯 سطح فشرده‌سازی 7z (1=سریع، 9=حداکثر، پیش‌فرض: 9)'
         required: false
         type: number
         default: 9
+      mp3_bitrate:
+        description: '🎵 بیت‌ریت MP3 (320k, 192k, 128k, 64k - پیش‌فرض: بدون تغییر)'
+        required: false
+        type: string
+        default: 'none'
       cookies:
-        description: '🍪 کوکی برای لینک‌های محافظت شده (اختیاری، فرمت: name=value; name2=value2)'
+        description: '🍪 کوکی برای لینک‌های محافظت شده (اختیاری)'
         required: false
         type: string
         default: ''
@@ -55,29 +60,25 @@ jobs:
   download-and-commit:
     runs-on: ubuntu-latest
     steps:
-      - name: 🔄 دریافت کد مخزن
+      - name: دریافت کد مخزن
         uses: actions/checkout@v4.2.2
 
-      - name: ⚙️ نصب ابزارهای پیشرفته
+      - name: نصب ابزارها
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             p7zip-full \
-            p7zip-rar \
-            pigz \
-            pbzip2 \
+            ffmpeg \
             jq \
-            wget \
             curl \
             file \
             coreutils \
-            parallel \
             python3
 
-      - name: 🔐 تنظیم متغیرهای امن و پالایش ورودی
+      - name: تنظیم متغیرهای امن
         id: sanitize
         run: |
-          # پالایش URLها برای جلوگیری از Command Injection
+          # پالایش URLها
           echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | while read url; do
             if [[ ! "$url" =~ ^https?:// ]]; then
               echo "❌ خطا: لینک نامعتبر: $url"
@@ -85,7 +86,7 @@ jobs:
             fi
           done
           
-          # ساخت نام پوشه امن
+          # نام پوشه
           if [ -z "${{ github.event.inputs.custom_dir_name }}" ]; then
             SAFE_DIR_NAME="downloaded_$(date +'%Y%m%d_%H%M%S')"
           else
@@ -93,14 +94,7 @@ jobs:
           fi
           echo "safe_dir_name=$SAFE_DIR_NAME" >> $GITHUB_OUTPUT
           
-          # بررسی وجود پوشه در مخزن
-          if [ -d "$SAFE_DIR_NAME" ]; then
-            echo "📁 پوشه '$SAFE_DIR_NAME' از قبل وجود دارد → فایل جدید به همان پوشه اضافه می‌شود"
-          else
-            echo "📁 پوشه جدید '$SAFE_DIR_NAME' ساخته می‌شود"
-          fi
-          
-          # ساخت نام فایل امن
+          # نام فایل
           if [ -n "${{ github.event.inputs.custom_filename }}" ]; then
             SAFE_FILENAME=$(echo "${{ github.event.inputs.custom_filename }}" | sed 's/[\\/:*?"<>|]/_/g' | sed 's/ //g')
           else
@@ -115,29 +109,26 @@ jobs:
             exit 1
           fi
           echo "split_size=${SPLIT_SIZE}m" >> $GITHUB_OUTPUT
+          
+          # اعتبارسنجی بیت‌ریت MP3
+          MP3_BITRATE="${{ github.event.inputs.mp3_bitrate }}"
+          if [[ "$MP3_BITRATE" != "none" && "$MP3_BITRATE" != "320k" && "$MP3_BITRATE" != "192k" && "$MP3_BITRATE" != "128k" && "$MP3_BITRATE" != "64k" ]]; then
+            echo "❌ بیت‌ریت نامعتبر: $MP3_BITRATE"
+            exit 1
+          fi
+          echo "mp3_bitrate=$MP3_BITRATE" >> $GITHUB_OUTPUT
 
-      - name: 📥 پردازش و دان/لود فایل‌ها با نمایش پیشرفت
+      - name: پردازش و دان/لود فایل‌ها
         id: process
         run: |
-          # استفاده از نام پوشه (همان پوشه قبلی اگر وجود داشته باشد)
           FINAL_DIR="${{ steps.sanitize.outputs.safe_dir_name }}"
-          
-          # ایجاد پوشه اگر وجود نداشته باشد
           mkdir -p "$FINAL_DIR"
           
-          # پشتیبان‌گیری از فایل README قبلی (اگر وجود داشته باشد)
-          if [ -f "$FINAL_DIR/README.md" ]; then
-            cp "$FINAL_DIR/README.md" /tmp/old_readme.md
-            echo "📝 فایل README قبلی پشتیبان گرفته شد"
-          fi
-          
-          # ساخت آرایه از URLها
           echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' > /tmp/urls.txt
           
           TOTAL_URLS=$(wc -l < /tmp/urls.txt)
           CURRENT=0
           
-          # ساخت کوکی فایل برای curl
           if [ -n "${{ github.event.inputs.cookies }}" ]; then
             echo "${{ github.event.inputs.cookies }}" | sed 's/; /\n/g' > /tmp/cookies.txt
             COOKIE_OPT="--cookie /tmp/cookies.txt"
@@ -150,265 +141,205 @@ jobs:
             CURRENT=$((CURRENT + 1))
             
             echo "========================================="
-            echo "📥 [$CURRENT/$TOTAL_URLS] شروع دان/لود: $URL"
+            echo "📥 [$CURRENT/$TOTAL_URLS] شروع دان/لود"
             
-            # استخراج نام فایل از لینک با پشتیبانی از UTF-8
+            # استخراج نام فایل
             ORIGINAL_FILENAME=$(basename "$URL" | sed 's/\?.*//' | python3 -c "import sys; from urllib.parse import unquote; print(unquote(sys.stdin.read()))" 2>/dev/null || basename "$URL" | sed 's/\?.*//')
             
             if [ -z "$ORIGINAL_FILENAME" ]; then
               ORIGINAL_FILENAME="downloaded_file_$(date +%s)"
             fi
             
-            # بررسی نام دلخواه فایل
+            # نام نهایی فایل
             if [ -n "${{ steps.sanitize.outputs.safe_filename }}" ]; then
               EXT="${ORIGINAL_FILENAME##*.}"
               if [ "$EXT" != "$ORIGINAL_FILENAME" ]; then
-                FINAL_FILENAME="${{ steps.sanitize.outputs.safe_filename }}.$EXT"
+                FINAL_NAME="${{ steps.sanitize.outputs.safe_filename }}.$EXT"
               else
-                FINAL_FILENAME="${{ steps.sanitize.outputs.safe_filename }}"
+                FINAL_NAME="${{ steps.sanitize.outputs.safe_filename }}"
               fi
             else
-              FINAL_FILENAME="$ORIGINAL_FILENAME"
+              FINAL_NAME="$ORIGINAL_FILENAME"
             fi
             
-            # اگر فایل با همین نام از قبل در پوشه وجود دارد، زمان فعلی را به آن اضافه کن
-            if [ -f "$FINAL_DIR/$FINAL_FILENAME" ]; then
-              BASE_NAME="${FINAL_FILENAME%.*}"
-              EXTENSION="${FINAL_FILENAME##*.}"
-              TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
-              if [ "$EXTENSION" != "$FINAL_FILENAME" ]; then
-                FINAL_FILENAME="${BASE_NAME}_${TIMESTAMP}.${EXTENSION}"
-              else
-                FINAL_FILENAME="${BASE_NAME}_${TIMESTAMP}"
-              fi
-              echo "⚠️ فایل تکراری → نام جدید: $FINAL_FILENAME"
-            fi
-            
-            # پشتیبانی از نام فارسی
             export LANG=fa_IR.UTF-8
             export LC_ALL=fa_IR.UTF-8
             
-            echo "نام فایل: $FINAL_FILENAME"
+            echo "نام فایل: $FINAL_NAME"
             
-            # دان/لود با نمایش پیشرفت
+            # دان/لود فایل
             curl -L --fail --retry 5 --retry-delay 3 --retry-max-time 60 \
               --progress-bar \
               --user-agent "${{ github.event.inputs.user_agent }}" \
               $COOKIE_OPT \
-              --output "$FINAL_FILENAME" \
-              --limit-rate 100M \
+              --output "$FINAL_NAME" \
               "$URL"
             
             if [ $? -ne 0 ]; then
-              echo "❌ خطا در دان/لود: $URL → ادامه به لینک بعدی"
+              echo "❌ خطا در دان/لود → ادامه به لینک بعدی"
               continue
             fi
             
-            # چک کردن حجم فایل (بر حسب بایت)
-            FILE_SIZE=$(stat -c%s "$FINAL_FILENAME" 2>/dev/null || stat -f%z "$FINAL_FILENAME" 2>/dev/null)
+            FILE_SIZE=$(stat -c%s "$FINAL_NAME" 2>/dev/null || stat -f%z "$FINAL_NAME" 2>/dev/null)
             FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
-            echo "✅ دریافت شد: $FINAL_FILENAME (حجم: $FILE_SIZE_MB MB)"
+            echo "✅ دریافت شد: $FINAL_NAME ($FILE_SIZE_MB MB)"
             
-            if [ $FILE_SIZE_MB -gt 1500 ]; then
-              echo "⚠️ هشدار: حجم فایل ($FILE_SIZE_MB MB) نزدیک به محدودیت مخزن است!"
+            MIME=$(file -b --mime-type "$FINAL_NAME")
+            EXT="${FINAL_NAME##*.}"
+            EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
+            
+            # پردازش فایل بر اساس نوع
+            PROCESSED_FILE="$FINAL_NAME"
+            
+            # فشرده‌سازی MP3 با ffmpeg
+            if [[ "$EXT" == "mp3" || "$MIME" == "audio/mpeg" ]]; then
+              MP3_BITRATE="${{ steps.sanitize.outputs.mp3_bitrate }}"
+              if [ "$MP3_BITRATE" != "none" ]; then
+                echo "🎵 تبدیل MP3 به بیت‌ریت $MP3_BITRATE..."
+                TEMP_MP3="temp_${FINAL_NAME}"
+                ffmpeg -i "$FINAL_NAME" -b:a "$MP3_BITRATE" -c:a libmp3lame -y "$TEMP_MP3" 2>/dev/null
+                if [ $? -eq 0 ]; then
+                  NEW_SIZE=$(stat -c%s "$TEMP_MP3" 2>/dev/null || stat -f%z "$TEMP_MP3" 2>/dev/null)
+                  NEW_SIZE_MB=$((NEW_SIZE / 1024 / 1024))
+                  echo "✅ تبدیل شد: $FILE_SIZE_MB MB → $NEW_SIZE_MB MB"
+                  rm -f "$FINAL_NAME"
+                  mv "$TEMP_MP3" "$FINAL_NAME"
+                  PROCESSED_FILE="$FINAL_NAME"
+                else
+                  echo "⚠️ خطا در تبدیل، ادامه با فایل اصلی"
+                fi
+              fi
             fi
             
-            # تشخیص MIME type
-            MIME=$(file -b --mime-type "$FINAL_FILENAME")
-            echo "نوع فایل: $MIME"
+            # فشرده‌سازی نهایی با 7z
+            echo "🗜️ فشرده‌سازی فایل..."
             
-            # نام فایل فشرده نهایی (با توجه به فایل‌های قبلی)
-            ARCHIVE_NAME="archive"
+            # نام فایل نهایی آرشیو
+            if [[ "$EXT" == "mp3" || "$MIME" == "audio/mpeg" ]]; then
+              BASE_NAME="${FINAL_NAME%.*}"
+              ARCHIVE_NAME="${BASE_NAME}_bitrate_${{ steps.sanitize.outputs.mp3_bitrate }}.7z"
+            else
+              ARCHIVE_NAME="${FINAL_NAME}.7z"
+            fi
+            
+            # رفع تکراری بودن نام
             COUNTER=1
-            while [ -f "$FINAL_DIR/${ARCHIVE_NAME}.7z" ] || [ -f "$FINAL_DIR/${ARCHIVE_NAME}.7z.001" ]; do
-              ARCHIVE_NAME="archive_${COUNTER}"
+            while [ -f "$FINAL_DIR/$ARCHIVE_NAME" ]; do
+              if [[ "$EXT" == "mp3" || "$MIME" == "audio/mpeg" ]]; then
+                ARCHIVE_NAME="${BASE_NAME}_bitrate_${{ steps.sanitize.outputs.mp3_bitrate }}_${COUNTER}.7z"
+              else
+                BASE="${FINAL_NAME%.*}"
+                ARCHIVE_NAME="${BASE}_${COUNTER}.7z"
+              fi
               COUNTER=$((COUNTER + 1))
             done
             
-            # فشرده‌سازی با شرط حجم
+            # فشرده‌سازی با 7z
             if [ $FILE_SIZE -lt 104857600 ]; then
-              echo "🗜️ فایل کمتر از 100 مگابایت است → فشرده‌سازی بدون اسپلیت (Single file)"
-              
               if [ -n "${{ github.event.inputs.password }}" ]; then
-                7z a -t7z \
-                  -m0=lzma2 \
-                  -mx=${{ github.event.inputs.compression_level }} \
-                  -mmt=on \
-                  -ms=on \
-                  -mhe=on \
-                  -p"${{ github.event.inputs.password }}" \
-                  "$FINAL_DIR/${ARCHIVE_NAME}.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+                7z a -t7z -mx=${{ github.event.inputs.compression_level }} -mhe=on -p"${{ github.event.inputs.password }}" "$FINAL_DIR/$ARCHIVE_NAME" "./$PROCESSED_FILE" > /dev/null 2>&1
               else
-                7z a -t7z \
-                  -m0=lzma2 \
-                  -mx=${{ github.event.inputs.compression_level }} \
-                  -mmt=on \
-                  -ms=on \
-                  "$FINAL_DIR/${ARCHIVE_NAME}.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+                7z a -t7z -mx=${{ github.event.inputs.compression_level }} "$FINAL_DIR/$ARCHIVE_NAME" "./$PROCESSED_FILE" > /dev/null 2>&1
               fi
             else
-              echo "🗜️ فایل 100 مگابایت یا بیشتر است → فشرده‌سازی با اسپلیت (تکه‌های ${{ steps.sanitize.outputs.split_size }})"
-              
               if [ -n "${{ github.event.inputs.password }}" ]; then
-                7z a -t7z \
-                  -m0=lzma2 \
-                  -mx=${{ github.event.inputs.compression_level }} \
-                  -mmt=on \
-                  -ms=on \
-                  -mhe=on \
-                  -p"${{ github.event.inputs.password }}" \
-                  -v${{ steps.sanitize.outputs.split_size }} \
-                  "$FINAL_DIR/${ARCHIVE_NAME}.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+                7z a -t7z -mx=${{ github.event.inputs.compression_level }} -mhe=on -p"${{ github.event.inputs.password }}" -v${{ steps.sanitize.outputs.split_size }} "$FINAL_DIR/$ARCHIVE_NAME" "./$PROCESSED_FILE" > /dev/null 2>&1
               else
-                7z a -t7z \
-                  -m0=lzma2 \
-                  -mx=${{ github.event.inputs.compression_level }} \
-                  -mmt=on \
-                  -ms=on \
-                  -v${{ steps.sanitize.outputs.split_size }} \
-                  "$FINAL_DIR/${ARCHIVE_NAME}.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+                7z a -t7z -mx=${{ github.event.inputs.compression_level }} -v${{ steps.sanitize.outputs.split_size }} "$FINAL_DIR/$ARCHIVE_NAME" "./$PROCESSED_FILE" > /dev/null 2>&1
               fi
             fi
             
             if [ $? -eq 0 ]; then
-              COMPRESSED_SIZE=$(du -sh "$FINAL_DIR" | cut -f1)
-              echo "✅ فشرده‌سازی کامل شد (حجم نهایی: $COMPRESSED_SIZE)"
-              echo "📦 فایل فشرده: ${ARCHIVE_NAME}.7z"
+              echo "✅ فشرده‌سازی کامل شد: $ARCHIVE_NAME"
             else
-              echo "⚠️ خطا در فشرده‌سازی، ادامه با فایل اصلی"
-              cp "./$FINAL_FILENAME" "$FINAL_DIR/${ARCHIVE_NAME}_original.$EXT"
+              echo "⚠️ خطا در فشرده‌سازی، ذخیره فایل اصلی"
+              cp "./$PROCESSED_FILE" "$FINAL_DIR/$FINAL_NAME"
             fi
             
-            rm -f "$FINAL_FILENAME"
+            rm -f "$FINAL_NAME" "$PROCESSED_FILE"
             
           done < /tmp/urls.txt
           
-          echo "🎉 همه عملیات با موفقیت انجام شد!"
           echo "final_dir=$FINAL_DIR" >> $GITHUB_OUTPUT
 
-      - name: 📝 ساخت/به‌روزرسانی README.md برای پوشه
+      - name: ساخت README
         run: |
           FINAL_DIR="${{ steps.process.outputs.final_dir }}"
           
-          # اطمینان از وجود پوشه نهایی
           if [ ! -d "$FINAL_DIR" ]; then
-            echo "❌ خطا: پوشه $FINAL_DIR وجود ندارد!"
+            echo "❌ خطا: پوشه وجود ندارد"
             exit 1
           fi
           
-          # تاریخ فعلی برای استفاده در README
           CURRENT_DATE=$(date +'%Y-%m-%d %H:%M:%S')
           
-          # اگر README قبلی وجود داشت، توضیحات جدید را به آن اضافه کن
           if [ -f "$FINAL_DIR/README.md" ]; then
-            echo "📝 به‌روزرسانی README موجود..."
-            
-            # اضافه کردن جداکننده و توضیحات جدید
-            {
-              echo ""
-              echo "---"
-              echo ""
-              echo "## 📥 اضافه شده در تاریخ $CURRENT_DATE"
-              echo ""
-              echo "${{ github.event.inputs.description_text }}"
-              echo ""
-              echo "**لینک(های) دان/لود شده:**"
-              echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | while read url; do
-                echo "- $url"
-              done
-            } >> "$FINAL_DIR/README.md"
-            
+            echo "" >> "$FINAL_DIR/README.md"
+            echo "---" >> "$FINAL_DIR/README.md"
+            echo "" >> "$FINAL_DIR/README.md"
+            echo "## 📥 اضافه شده در تاریخ $CURRENT_DATE" >> "$FINAL_DIR/README.md"
+            echo "" >> "$FINAL_DIR/README.md"
+            echo "${{ github.event.inputs.description_text }}" >> "$FINAL_DIR/README.md"
           else
-            # ساخت README جدید با استفاده از روش مطمئن‌تر
-            echo "📝 ساخت README جدید..."
+            cat > "$FINAL_DIR/README.md" << 'EOF'
+            # 📦 فایل‌های دان/لود شده
             
-            {
-              echo "# 📦 فایل‌های دان/لود شده توسط Down/loader حرفه‌ای"
-              echo ""
-              echo "**${{ github.event.inputs.description_text }}**"
-              echo ""
-              echo "## ℹ️ اطلاعات اولین دان/لود"
-              echo ""
-              echo "- **تاریخ دان/لود:** $CURRENT_DATE"
-              echo "- **توسط اکشن:** ${{ github.workflow }}"
-              echo "- **از مخزن:** ${{ github.repository }}"
-              echo ""
-              echo "## 🔐 جزئیات فشرده‌سازی"
-              echo ""
-              echo "- **روش فشرده‌سازی:** 7-Zip با حداکثر فشردگی (LZMA2)"
-              echo "- **سطح فشرده‌سازی:** ${{ github.event.inputs.compression_level }}"
-              echo "- **حجم هر تکه:** ${{ github.event.inputs.split_size_mb }} MB"
-              if [ -n "${{ github.event.inputs.password }}" ]; then
-                echo "- **رمزگذاری:** فعال (رمز مورد نیاز)"
-              else
-                echo "- **رمزگذاری:** غیرفعال"
-              fi
-              echo ""
-              echo "## 🔗 لینک‌های دان/لود شده"
-              echo ""
-              echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | while read url; do
-                echo "- $url"
-              done
-              echo ""
-              echo "## 📂 نحوه استفاده"
-              echo ""
-              echo "1. فایل‌های با پسوند \`.7z\` یا \`.7z.001\`، \`.7z.002\` و ... را دان/لود کنید"
-              echo "2. با نرم‌افزارهای استخراج مثل WinRAR یا 7-Zip، فایل اول را باز کنید"
-              if [ -n "${{ github.event.inputs.password }}" ]; then
-                echo "3. رمز فشرده را وارد کنید"
-                echo "4. فایل نهایی را استخراج کنید"
-              else
-                echo "3. فایل نهایی را استخراج کنید"
-              fi
-              echo ""
-              echo "---"
-              echo "*این پوشه به صورت خودکار توسط GitHub Actions مدیریت می‌شود*"
-            } > "$FINAL_DIR/README.md"
+            **${{ github.event.inputs.description_text }}**
             
+            ## ℹ️ اطلاعات
+            
+            - **تاریخ دان/لود:** $CURRENT_DATE
+            - **سطح فشرده‌سازی 7z:** ${{ github.event.inputs.compression_level }}
+            EOF
+            
+            if [ -n "${{ github.event.inputs.password }}" ]; then
+              echo "- **رمزگذاری:** فعال" >> "$FINAL_DIR/README.md"
+            else
+              echo "- **رمزگذاری:** غیرفعال" >> "$FINAL_DIR/README.md"
+            fi
+            
+            MP3_BITRATE="${{ steps.sanitize.outputs.mp3_bitrate }}"
+            if [ "$MP3_BITRATE" != "none" ]; then
+              echo "- **بیت‌ریت MP3:** $MP3_BITRATE" >> "$FINAL_DIR/README.md"
+            fi
+            
+            cat >> "$FINAL_DIR/README.md" << 'EOF'
+            
+            ## 📂 نحوه استفاده
+            
+            1. فایل‌های 7z را دان/لود کنید
+            2. با 7-Zip یا WinRAR استخراج کنید
+            EOF
+            
+            if [ -n "${{ github.event.inputs.password }}" ]; then
+              echo "3. رمز را وارد کنید" >> "$FINAL_DIR/README.md"
+            fi
+            
+            echo "" >> "$FINAL_DIR/README.md"
+            echo "---" >> "$FINAL_DIR/README.md"
+            echo "*تولید شده توسط GitHub Actions*" >> "$FINAL_DIR/README.md"
           fi
           
-          # تأیید ایجاد فایل
-          if [ -f "$FINAL_DIR/README.md" ]; then
-            echo "✅ فایل README با موفقیت در $FINAL_DIR/README.md ایجاد/به‌روزرسانی شد"
-          else
-            echo "❌ خطا: فایل README ساخته نشد!"
-            exit 1
-          fi
+          echo "✅ README ساخته شد"
 
-      - name: 📤 کامیت و پوش به مخزن
+      - name: کامیت و انتشار
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          git config http.postBuffer 524288000
-          git config core.compression 9
-          
           git add "${{ steps.process.outputs.final_dir }}/"
-          git add README.md 2>/dev/null || true
-          
-          git commit -m "➕ افزودن فایل دان/لود شده: ${{ steps.sanitize.outputs.safe_dir_name }}
-          
-          توضیحات: ${{ github.event.inputs.description_text }}
-          حجم فشرده: $(du -sh ${{ steps.process.outputs.final_dir }} | cut -f1)
-          
-          دان/لود شده توسط GitHub Actions
-          " || echo "📝 هیچ فایل جدیدی برای کامیت وجود ندارد"
+          git commit -m "Add files" || echo "Nothing to commit"
           
           git push --force-with-lease origin main || git push --force-with-lease origin master
           
-          echo "✅ فایل‌ها با موفقیت در مخزن ذخیره شدند"
+          echo "✅ انتشار یافت"
 
-      - name: 📊 گزارش نهایی
+      - name: گزارش نهایی
         run: |
           echo "========================================="
-          echo "🎉 فرآیند دان/لود با موفقیت کامل شد!"
+          echo "✅ فرآیند دان/لود کامل شد!"
           echo "========================================="
-          echo "📁 پوشه نهایی: ${{ steps.process.outputs.final_dir }}"
-          echo "📊 حجم نهایی: $(du -sh ${{ steps.process.outputs.final_dir }} | cut -f1)"
+          echo "📁 پوشه: ${{ steps.process.outputs.final_dir }}"
+          echo "📊 حجم: $(du -sh ${{ steps.process.outputs.final_dir }} | cut -f1)"
           echo "🔢 تعداد فایل‌ها: $(find ${{ steps.process.outputs.final_dir }} -type f | wc -l)"
-          echo "========================================="
-          echo "💾 برای دان/لود فایل‌ها:"
-          echo "  → روی دکمه Code کلیک کنید"
-          echo "  → گزینه Download ZIP را بزنید"
-          echo "  → فایل‌های استخراج شده در پوشه ${{ steps.process.outputs.final_dir }} قرار دارند"
           echo "========================================="
