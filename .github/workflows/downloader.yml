@@ -1,0 +1,294 @@
+name: '🚀 نسخه حرفه‌ای: دانلود، فشرده‌سازی و ذخیره در مخزن'
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_urls:
+        description: '🔗 لینک مستقیم فایل‌ها (با کاما جدا کنید)'
+        required: true
+        type: string
+      custom_dir_name:
+        description: '📁 نام دلخواه برای پوشه اصلی (اختیاری)'
+        required: false
+        type: string
+        default: ''
+      custom_filename:
+        description: '📄 نام دلخواه برای فایل نهایی (بدون پسوند، اختیاری)'
+        required: false
+        type: string
+        default: ''
+      description_text:
+        description: '📝 توضیحات برای فایل README (اختیاری)'
+        required: false
+        type: string
+        default: 'فایل دانلود شده توسط IR-Downloader حرفه‌ای'
+      password:
+        description: '🔐 رمز فایل فشرده (اختیاری)'
+        required: false
+        type: string
+        default: ''
+      split_size_mb:
+        description: '📦 حجم هر تکه به مگابایت (حداکثر 95، پیش‌فرض: 95)'
+        required: false
+        type: number
+        default: 95
+      compression_level:
+        description: '🎯 سطح فشرده‌سازی (1=سریع، 9=حداکثر، پیش‌فرض: 9)'
+        required: false
+        type: number
+        default: 9
+      cookies:
+        description: '🍪 کوکی برای لینک‌های محافظت شده (اختیاری، فرمت: name=value; name2=value2)'
+        required: false
+        type: string
+        default: ''
+      user_agent:
+        description: '🌐 User-Agent دلخواه (اختیاری)'
+        required: false
+        type: string
+        default: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔄 دریافت کد مخزن
+        uses: actions/checkout@v4
+
+      - name: ⚙️ نصب ابزارهای پیشرفته
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            p7zip-full \
+            p7zip-rar \
+            pigz \
+            pbzip2 \
+            jq \
+            wget \
+            curl \
+            file \
+            coreutils \
+            parallel
+
+      - name: 🔐 تنظیم متغیرهای امن و پالایش ورودی
+        id: sanitize
+        run: |
+          # پالایش URLها برای جلوگیری از Command Injection
+          echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | while read url; do
+            if [[ ! "$url" =~ ^https?:// ]]; then
+              echo "❌ خطا: لینک نامعتبر: $url"
+              exit 1
+            fi
+          done
+          
+          # ساخت نام پوشه امن
+          if [ -z "${{ github.event.inputs.custom_dir_name }}" ]; then
+            SAFE_DIR_NAME="downloaded_$(date +'%Y%m%d_%H%M%S')"
+          else
+            SAFE_DIR_NAME=$(echo "${{ github.event.inputs.custom_dir_name }}" | sed 's/[\\/:*?"<>|]/_/g' | sed 's/ //g')
+          fi
+          echo "safe_dir_name=$SAFE_DIR_NAME" >> $GITHUB_OUTPUT
+          
+          # ساخت نام فایل امن
+          if [ -n "${{ github.event.inputs.custom_filename }}" ]; then
+            SAFE_FILENAME=$(echo "${{ github.event.inputs.custom_filename }}" | sed 's/[\\/:*?"<>|]/_/g' | sed 's/ //g')
+          else
+            SAFE_FILENAME=""
+          fi
+          echo "safe_filename=$SAFE_FILENAME" >> $GITHUB_OUTPUT
+          
+          # اعتبارسنجی حجم تکه‌ها
+          SPLIT_SIZE=${{ github.event.inputs.split_size_mb }}
+          if [ $SPLIT_SIZE -gt 95 ] || [ $SPLIT_SIZE -lt 1 ]; then
+            echo "❌ حجم تکه باید بین 1 تا 95 مگابایت باشد"
+            exit 1
+          fi
+          echo "split_size=${SPLIT_SIZE}m" >> $GITHUB_OUTPUT
+
+      - name: 📥 پردازش و دانلود فایل‌ها با نمایش پیشرفت
+        id: process
+        run: |
+          # ایجاد دایرکتوری اصلی
+          FINAL_DIR="${{ steps.sanitize.outputs.safe_dir_name }}"
+          mkdir -p "$FINAL_DIR"
+          
+          # ساخت آرایه از URLها
+          echo "${{ github.event.inputs.file_urls }}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' > /tmp/urls.txt
+          
+          TOTAL_URLS=$(wc -l < /tmp/urls.txt)
+          CURRENT=0
+          
+          # ساخت کوکی فایل برای curl
+          if [ -n "${{ github.event.inputs.cookies }}" ]; then
+            echo "${{ github.event.inputs.cookies }}" | sed 's/; /\n/g' > /tmp/cookies.txt
+            COOKIE_OPT="--cookie /tmp/cookies.txt"
+          else
+            COOKIE_OPT=""
+          fi
+          
+          while IFS= read -r URL || [ -n "$URL" ]; do
+            [ -z "$URL" ] && continue
+            CURRENT=$((CURRENT + 1))
+            
+            echo "========================================="
+            echo "📥 [$CURRENT/$TOTAL_URLS] شروع دانلود: $URL"
+            
+            # استخراج نام فایل از لینک با پشتیبانی از UTF-8
+            ORIGINAL_FILENAME=$(basename "$URL" | sed 's/\?.*//' | python3 -c "import sys; from urllib.parse import unquote; print(unquote(sys.stdin.read()))" 2>/dev/null || basename "$URL" | sed 's/\?.*//')
+            
+            if [ -z "$ORIGINAL_FILENAME" ]; then
+              ORIGINAL_FILENAME="downloaded_file_$(date +%s)"
+            fi
+            
+            if [ -n "${{ steps.sanitize.outputs.safe_filename }}" ] && [ $CURRENT -eq 1 ]; then
+              EXT="${ORIGINAL_FILENAME##*.}"
+              if [ "$EXT" != "$ORIGINAL_FILENAME" ]; then
+                FINAL_FILENAME="${{ steps.sanitize.outputs.safe_filename }}.$EXT"
+              else
+                FINAL_FILENAME="${{ steps.sanitize.outputs.safe_filename }}"
+              fi
+            else
+              FINAL_FILENAME="$ORIGINAL_FILENAME"
+            fi
+            
+            # پشتیبانی از نام فارسی
+            export LANG=fa_IR.UTF-8
+            export LC_ALL=fa_IR.UTF-8
+            
+            echo "نام فایل: $FINAL_FILENAME"
+            
+            # دانلود با نمایش پیشرفت
+            curl -L --fail --retry 5 --retry-delay 3 --retry-max-time 60 \
+              --progress-bar \
+              --user-agent "${{ github.event.inputs.user_agent }}" \
+              $COOKIE_OPT \
+              --output "$FINAL_FILENAME" \
+              --limit-rate 100M \
+              "$URL"
+            
+            if [ $? -ne 0 ]; then
+              echo "❌ خطا در دانلود: $URL → ادامه به لینک بعدی"
+              continue
+            fi
+            
+            # چک کردن حجم فایل
+            FILE_SIZE=$(stat -c%s "$FINAL_FILENAME" 2>/dev/null || stat -f%z "$FINAL_FILENAME" 2>/dev/null)
+            FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+            echo "✅ دریافت شد: $FINAL_FILENAME (حجم: $FILE_SIZE_MB MB)"
+            
+            if [ $FILE_SIZE_MB -gt 1500 ]; then
+              echo "⚠️ هشدار: حجم فایل ($FILE_SIZE_MB MB) نزدیک به محدودیت مخزن است!"
+            fi
+            
+            # تشخیص MIME type
+            MIME=$(file -b --mime-type "$FINAL_FILENAME")
+            echo "نوع فایل: $MIME"
+            
+            # فشرده‌سازی پیشرفته
+            echo "🗜️ در حال فشرده‌سازی با حداکثر کیفیت..."
+            
+            if [ -n "${{ github.event.inputs.password }}" ]; then
+              7z a -t7z \
+                -m0=lzma2 \
+                -mx=${{ github.event.inputs.compression_level }} \
+                -mmt=on \
+                -ms=on \
+                -mhe=on \
+                -p"${{ github.event.inputs.password }}" \
+                -v${{ steps.sanitize.outputs.split_size }} \
+                "$FINAL_DIR/archive.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+            else
+              7z a -t7z \
+                -m0=lzma2 \
+                -mx=${{ github.event.inputs.compression_level }} \
+                -mmt=on \
+                -ms=on \
+                -v${{ steps.sanitize.outputs.split_size }} \
+                "$FINAL_DIR/archive.7z" "./$FINAL_FILENAME" > /tmp/7z.log 2>&1
+            fi
+            
+            if [ $? -eq 0 ]; then
+              COMPRESSED_SIZE=$(du -sh "$FINAL_DIR" | cut -f1)
+              echo "✅ فشرده‌سازی کامل شد (حجم نهایی: $COMPRESSED_SIZE)"
+            else
+              echo "⚠️ خطا در فشرده‌سازی، ادامه با فایل اصلی"
+              cp "./$FINAL_FILENAME" "$FINAL_DIR/"
+            fi
+            
+            rm -f "$FINAL_FILENAME"
+            
+          done < /tmp/urls.txt
+          
+          echo "🎉 همه عملیات با موفقیت انجام شد!"
+          echo "final_dir=$FINAL_DIR" >> $GITHUB_OUTPUT
+
+      - name: 📝 ساخت README.md خودکار برای پوشه
+        run: |
+          FINAL_DIR="${{ steps.process.outputs.final_dir }}"
+          
+          cat > "$FINAL_DIR/README.md" << 'EOF'
+          # 📦 فایل دانلود شده توسط IR-Downloader حرفه‌ای
+          
+          **${{ github.event.inputs.description_text }}**
+          
+          ## ℹ️ اطلاعات دانلود
+          
+          - **تاریخ دانلود:** $(date +'%Y-%m-%d %H:%M:%S')
+          - **توسط اکشن:** ${{ github.workflow }}
+          - **از مخزن:** ${{ github.repository }}
+          
+          ## 🔐 جزئیات فایل
+          
+          - **روش فشرده‌سازی:** 7-Zip با حداکثر فشردگی (LZMA2)
+          - **سطح فشرده‌سازی:** ${{ github.event.inputs.compression_level }}
+          - **حجم هر تکه:** ${{ github.event.inputs.split_size_mb }} MB
+          - **رمزگذاری:** $(if [ -n "${{ github.event.inputs.password }}" ]; then echo "فعال (رمز مورد نیاز)"; else echo "غیرفعال"; fi)
+          
+          ## 📂 نحوه استفاده
+          
+          1. تمام فایل‌های با پسوند `.7z.001`، `.7z.002` و ... را دانلود کنید
+          2. با نرم‌افزارهای استخراج مثل WinRAR یا 7-Zip، فایل اول (archive.7z.001) را باز کنید
+          3. $(if [ -n "${{ github.event.inputs.password }}" ]; then echo "رمز فشرده را وارد کنید"; fi)
+          4. فایل نهایی را استخراج کنید
+          
+          ---
+          *این فایل به صورت خودکار توسط GitHub Actions ساخته شده است*
+          EOF
+          
+          echo "✅ فایل README ساخته شد"
+
+      - name: 📤 کامیت و پوش به مخزن
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git config http.postBuffer 524288000
+          git config core.compression 9
+          
+          git add "${{ steps.process.outputs.final_dir }}/"
+          git add README.md 2>/dev/null || true
+          
+          git commit -m "➕ افزودن فایل دانلود شده: ${{ steps.sanitize.outputs.safe_dir_name }}
+          
+          توضیحات: ${{ github.event.inputs.description_text }}
+          حجم فشرده: $(du -sh ${{ steps.process.outputs.final_dir }} | cut -f1)
+          
+          دانلود شده توسط GitHub Actions
+          " || echo "📝 هیچ فایل جدیدی برای کامیت وجود ندارد"
+          
+          git push --force-with-lease origin main || git push --force-with-lease origin master
+          
+          echo "✅ فایل‌ها با موفقیت در مخزن ذخیره شدند"
+
+      - name: 📊 گزارش نهایی
+        run: |
+          echo "========================================="
+          echo "🎉 فرآیند دانلود با موفقیت کامل شد!"
+          echo "========================================="
+          echo "📁 پوشه نهایی: ${{ steps.process.outputs.final_dir }}"
+          echo "📊 حجم نهایی: $(du -sh ${{ steps.process.outputs.final_dir }} | cut -f1)"
+          echo "🔢 تعداد فایل‌ها: $(find ${{ steps.process.outputs.final_dir }} -type f | wc -l)"
+          echo "========================================="
