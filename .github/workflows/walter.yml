@@ -28,7 +28,7 @@ on:
         type: string
         default: ''
       split_size_mb:
-        description: '📦 حجم هر تکه به مگابایت (حداکثر 95، پیش‌فرض: 95) - فقط برای فایل‌های غیر رسانه‌ای بالای 100 مگابایت'
+        description: '📦 حجم هر تکه به مگابایت (حداکثر 95، پیش‌فرض: 95)'
         required: false
         type: number
         default: 95
@@ -37,8 +37,8 @@ on:
         required: false
         type: number
         default: 9
-      mp3_bitrate:
-        description: '🎵 بیت‌ریت MP3 (320k, 192k, 128k, 64k - پیش‌فرض: بدون تغییر)'
+      audio_bitrate:
+        description: '🎵 بیت‌ریت صوتی (320k, 192k, 128k, 64k - برای MP3، OGG، M4A، AAC، WAV، FLAC - پیش‌فرض: بدون تغییر)'
         required: false
         type: string
         default: 'none'
@@ -110,13 +110,13 @@ jobs:
           fi
           echo "split_size=${SPLIT_SIZE}m" >> $GITHUB_OUTPUT
           
-          # اعتبارسنجی بیت‌ریت MP3
-          MP3_BITRATE="${{ github.event.inputs.mp3_bitrate }}"
-          if [[ "$MP3_BITRATE" != "none" && "$MP3_BITRATE" != "320k" && "$MP3_BITRATE" != "192k" && "$MP3_BITRATE" != "128k" && "$MP3_BITRATE" != "64k" ]]; then
-            echo "❌ بیت‌ریت نامعتبر: $MP3_BITRATE"
+          # اعتبارسنجی بیت‌ریت صوتی
+          AUDIO_BITRATE="${{ github.event.inputs.audio_bitrate }}"
+          if [[ "$AUDIO_BITRATE" != "none" && "$AUDIO_BITRATE" != "320k" && "$AUDIO_BITRATE" != "192k" && "$AUDIO_BITRATE" != "128k" && "$AUDIO_BITRATE" != "64k" ]]; then
+            echo "❌ بیت‌ریت نامعتبر: $AUDIO_BITRATE"
             exit 1
           fi
-          echo "mp3_bitrate=$MP3_BITRATE" >> $GITHUB_OUTPUT
+          echo "audio_bitrate=$AUDIO_BITRATE" >> $GITHUB_OUTPUT
 
       - name: پردازش و دان/لود فایل‌ها
         id: process
@@ -190,40 +190,45 @@ jobs:
             
             # تشخیص نوع فایل
             IS_MEDIA=false
-            IS_MP3=false
+            IS_AUDIO=false
             
-            if [[ "$EXT" == "mp3" || "$MIME" == "audio/mpeg" ]]; then
+            # تشخیص فایل صوتی (همه فرمت‌ها)
+            if [[ "$EXT" =~ ^(mp3|ogg|m4a|aac|wav|flac|wma|opus|webm)$ || "$MIME" == audio/* ]]; then
               IS_MEDIA=true
-              IS_MP3=true
-              echo "🎵 فایل MP3 شناسایی شد"
-            elif [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ || "$MIME" == video/* ]]; then
+              IS_AUDIO=true
+              echo "🎵 فایل صوتی شناسایی شد (فرمت: $EXT)"
+            elif [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm|m4v)$ || "$MIME" == video/* ]]; then
               IS_MEDIA=true
               echo "🎬 فایل ویدیویی شناسایی شد"
-            elif [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp|svg)$ || "$MIME" == image/* ]]; then
+            elif [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp|svg|ico)$ || "$MIME" == image/* ]]; then
               IS_MEDIA=true
               echo "🖼️ فایل تصویری شناسایی شد"
-            elif [[ "$EXT" =~ ^(aac|wav|ogg|flac|m4a)$ || "$MIME" == audio/* ]]; then
-              IS_MEDIA=true
-              echo "🎵 فایل صوتی شناسایی شد"
             fi
             
             # پردازش فایل
             PROCESSED_FILE="$FINAL_NAME"
+            CONVERTED=false
             
-            # 1. تبدیل MP3 با ffmpeg (اگر انتخاب شده باشد)
-            if [ "$IS_MP3" = true ]; then
-              MP3_BITRATE="${{ steps.sanitize.outputs.mp3_bitrate }}"
-              if [ "$MP3_BITRATE" != "none" ]; then
-                echo "🎵 تبدیل MP3 به بیت‌ریت $MP3_BITRATE..."
-                TEMP_MP3="temp_${FINAL_NAME}"
-                ffmpeg -i "$FINAL_NAME" -b:a "$MP3_BITRATE" -c:a libmp3lame -y "$TEMP_MP3" 2>/dev/null
+            # 1. تبدیل فایل صوتی با ffmpeg (اگر انتخاب شده باشد)
+            if [ "$IS_AUDIO" = true ]; then
+              AUDIO_BITRATE="${{ steps.sanitize.outputs.audio_bitrate }}"
+              if [ "$AUDIO_BITRATE" != "none" ]; then
+                echo "🎵 تبدیل فایل صوتی به بیت‌ریت $AUDIO_BITRATE..."
+                TEMP_AUDIO="temp_${FINAL_NAME}"
+                # تبدیل به MP3 با بیت‌ریت مشخص
+                ffmpeg -i "$FINAL_NAME" -b:a "$AUDIO_BITRATE" -c:a libmp3lame -y "$TEMP_AUDIO" 2>/dev/null
                 if [ $? -eq 0 ]; then
-                  NEW_SIZE=$(stat -c%s "$TEMP_MP3" 2>/dev/null || stat -f%z "$TEMP_MP3" 2>/dev/null)
+                  NEW_SIZE=$(stat -c%s "$TEMP_AUDIO" 2>/dev/null || stat -f%z "$TEMP_AUDIO" 2>/dev/null)
                   NEW_SIZE_MB=$((NEW_SIZE / 1024 / 1024))
                   echo "✅ تبدیل شد: $FILE_SIZE_MB MB → $NEW_SIZE_MB MB"
                   rm -f "$FINAL_NAME"
-                  mv "$TEMP_MP3" "$FINAL_NAME"
+                  # تغییر نام به mp3
+                  NEW_NAME="${FINAL_NAME%.*}_${AUDIO_BITRATE}.mp3"
+                  mv "$TEMP_AUDIO" "$NEW_NAME"
+                  FINAL_NAME="$NEW_NAME"
                   PROCESSED_FILE="$FINAL_NAME"
+                  CONVERTED=true
+                  echo "📝 فایل جدید: $FINAL_NAME"
                 else
                   echo "⚠️ خطا در تبدیل، ادامه با فایل اصلی"
                 fi
@@ -231,9 +236,24 @@ jobs:
             fi
             
             # 2. تصمیم‌گیری برای فشرده‌سازی با 7z
-            if [ "$IS_MEDIA" = true ]; then
-              # فایل‌های رسانه‌ای: بدون فشرده‌سازی 7z
+            if [ "$IS_MEDIA" = true ] && [ "$CONVERTED" = false ]; then
+              # فایل‌های رسانه‌ای بدون تبدیل: ذخیره بدون فشرده‌سازی
               echo "📁 فایل رسانه‌ای → ذخیره بدون فشرده‌سازی"
+              
+              TARGET_NAME="$FINAL_NAME"
+              COUNTER=1
+              while [ -f "$FINAL_DIR/$TARGET_NAME" ]; do
+                BASE="${FINAL_NAME%.*}"
+                EXT="${FINAL_NAME##*.}"
+                TARGET_NAME="${BASE}_${COUNTER}.${EXT}"
+                COUNTER=$((COUNTER + 1))
+              done
+              
+              cp "$PROCESSED_FILE" "$FINAL_DIR/$TARGET_NAME"
+              echo "✅ ذخیره شد: $TARGET_NAME"
+            elif [ "$IS_MEDIA" = true ] && [ "$CONVERTED" = true ]; then
+              # فایل تبدیل شده به MP3: ذخیره بدون فشرده‌سازی
+              echo "📁 فایل MP3 تبدیل شده → ذخیره بدون فشرده‌سازی"
               
               TARGET_NAME="$FINAL_NAME"
               COUNTER=1
@@ -296,11 +316,10 @@ jobs:
           fi
           
           CURRENT_DATE=$(date +'%Y-%m-%d %H:%M:%S')
-          MP3_BITRATE="${{ steps.sanitize.outputs.mp3_bitrate }}"
+          AUDIO_BITRATE="${{ steps.sanitize.outputs.audio_bitrate }}"
           PASSWORD_SET="${{ github.event.inputs.password }}"
           DESCRIPTION="${{ github.event.inputs.description_text }}"
           
-          # ساخت فایل README با روش echo
           echo "# 📦 فایل‌های دان/لود شده" > "$FINAL_DIR/README.md"
           echo "" >> "$FINAL_DIR/README.md"
           echo "**${DESCRIPTION}**" >> "$FINAL_DIR/README.md"
@@ -310,8 +329,8 @@ jobs:
           echo "- **تاریخ دان/لود:** ${CURRENT_DATE}" >> "$FINAL_DIR/README.md"
           echo "- **سطح فشرده‌سازی 7z:** ${{ github.event.inputs.compression_level }}" >> "$FINAL_DIR/README.md"
           
-          if [ "$MP3_BITRATE" != "none" ]; then
-            echo "- **بیت‌ریت MP3:** ${MP3_BITRATE}" >> "$FINAL_DIR/README.md"
+          if [ "$AUDIO_BITRATE" != "none" ]; then
+            echo "- **بیت‌ریت صوتی:** ${AUDIO_BITRATE} (تبدیل به MP3)" >> "$FINAL_DIR/README.md"
           fi
           
           if [ -n "$PASSWORD_SET" ]; then
@@ -330,10 +349,8 @@ jobs:
           echo "---" >> "$FINAL_DIR/README.md"
           echo "*تولید شده توسط GitHub Actions*" >> "$FINAL_DIR/README.md"
           
-          # بررسی ایجاد فایل
           if [ -f "$FINAL_DIR/README.md" ]; then
-            echo "✅ README ساخته شد در $FINAL_DIR/README.md"
-            cat "$FINAL_DIR/README.md"
+            echo "✅ README ساخته شد"
           else
             echo "❌ خطا: README ساخته نشد"
             exit 1
