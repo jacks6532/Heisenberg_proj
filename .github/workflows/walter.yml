@@ -38,7 +38,7 @@ on:
         type: number
         default: 9
       audio_bitrate:
-        description: '🎵 بیت‌ریت صوتی (320k, 192k, 128k, 64k - برای MP3، OGG، M4A، AAC، WAV، FLAC - پیش‌فرض: بدون تغییر)'
+        description: '🎵 بیت‌ریت صوتی (320k, 192k, 128k, 64k - پیش‌فرض: بدون تغییر)'
         required: false
         type: string
         default: 'none'
@@ -192,7 +192,7 @@ jobs:
             IS_MEDIA=false
             IS_AUDIO=false
             
-            # تشخیص فایل صوتی (همه فرمت‌ها)
+            # تشخیص فایل صوتی
             if [[ "$EXT" =~ ^(mp3|ogg|m4a|aac|wav|flac|wma|opus|webm)$ || "$MIME" == audio/* ]]; then
               IS_MEDIA=true
               IS_AUDIO=true
@@ -209,20 +209,31 @@ jobs:
             PROCESSED_FILE="$FINAL_NAME"
             CONVERTED=false
             
-            # 1. تبدیل فایل صوتی با ffmpeg (اگر انتخاب شده باشد)
+            # 1. تبدیل فایل صوتی با ffmpeg (با مدیریت خطا)
             if [ "$IS_AUDIO" = true ]; then
               AUDIO_BITRATE="${{ steps.sanitize.outputs.audio_bitrate }}"
               if [ "$AUDIO_BITRATE" != "none" ]; then
-                echo "🎵 تبدیل فایل صوتی به بیت‌ریت $AUDIO_BITRATE..."
+                echo "🎵 در حال تبدیل فایل صوتی به بیت‌ریت $AUDIO_BITRATE..."
                 TEMP_AUDIO="temp_${FINAL_NAME}"
-                # تبدیل به MP3 با بیت‌ریت مشخص
-                ffmpeg -i "$FINAL_NAME" -b:a "$AUDIO_BITRATE" -c:a libmp3lame -y "$TEMP_AUDIO" 2>/dev/null
-                if [ $? -eq 0 ]; then
+                
+                # بررسی سلامت فایل قبل از تبدیل
+                echo "🔍 بررسی سلامت فایل صوتی..."
+                ffmpeg -v error -i "$FINAL_NAME" -f null - 2>&1 || true
+                
+                # تلاش برای تبدیل با گزینه‌های خطاگیری
+                echo "🔄 مرحله 1: تلاش برای تبدیل با کدک libmp3lame..."
+                ffmpeg -i "$FINAL_NAME" -b:a "$AUDIO_BITRATE" -c:a libmp3lame -vn -y "$TEMP_AUDIO" 2>&1
+                
+                if [ $? -ne 0 ]; then
+                  echo "⚠️ خطا در تبدیل با libmp3lame، تلاش با کدک aac..."
+                  ffmpeg -i "$FINAL_NAME" -b:a "$AUDIO_BITRATE" -c:a aac -vn -y "$TEMP_AUDIO" 2>&1
+                fi
+                
+                if [ $? -eq 0 ] && [ -f "$TEMP_AUDIO" ] && [ $(stat -c%s "$TEMP_AUDIO" 2>/dev/null || stat -f%z "$TEMP_AUDIO" 2>/dev/null) -gt 10000 ]; then
                   NEW_SIZE=$(stat -c%s "$TEMP_AUDIO" 2>/dev/null || stat -f%z "$TEMP_AUDIO" 2>/dev/null)
                   NEW_SIZE_MB=$((NEW_SIZE / 1024 / 1024))
-                  echo "✅ تبدیل شد: $FILE_SIZE_MB MB → $NEW_SIZE_MB MB"
+                  echo "✅ تبدیل موفقیت‌آمیز بود: $FILE_SIZE_MB MB → $NEW_SIZE_MB MB"
                   rm -f "$FINAL_NAME"
-                  # تغییر نام به mp3
                   NEW_NAME="${FINAL_NAME%.*}_${AUDIO_BITRATE}.mp3"
                   mv "$TEMP_AUDIO" "$NEW_NAME"
                   FINAL_NAME="$NEW_NAME"
@@ -230,30 +241,20 @@ jobs:
                   CONVERTED=true
                   echo "📝 فایل جدید: $FINAL_NAME"
                 else
-                  echo "⚠️ خطا در تبدیل، ادامه با فایل اصلی"
+                  echo "⚠️ تبدیل ناموفق بود، فایل اصلی ذخیره می‌شود"
+                  rm -f "$TEMP_AUDIO" 2>/dev/null
                 fi
               fi
             fi
             
-            # 2. تصمیم‌گیری برای فشرده‌سازی با 7z
-            if [ "$IS_MEDIA" = true ] && [ "$CONVERTED" = false ]; then
-              # فایل‌های رسانه‌ای بدون تبدیل: ذخیره بدون فشرده‌سازی
-              echo "📁 فایل رسانه‌ای → ذخیره بدون فشرده‌سازی"
-              
-              TARGET_NAME="$FINAL_NAME"
-              COUNTER=1
-              while [ -f "$FINAL_DIR/$TARGET_NAME" ]; do
-                BASE="${FINAL_NAME%.*}"
-                EXT="${FINAL_NAME##*.}"
-                TARGET_NAME="${BASE}_${COUNTER}.${EXT}"
-                COUNTER=$((COUNTER + 1))
-              done
-              
-              cp "$PROCESSED_FILE" "$FINAL_DIR/$TARGET_NAME"
-              echo "✅ ذخیره شد: $TARGET_NAME"
-            elif [ "$IS_MEDIA" = true ] && [ "$CONVERTED" = true ]; then
-              # فایل تبدیل شده به MP3: ذخیره بدون فشرده‌سازی
-              echo "📁 فایل MP3 تبدیل شده → ذخیره بدون فشرده‌سازی"
+            # 2. تصمیم‌گیری برای ذخیره‌سازی
+            if [ "$IS_MEDIA" = true ] || [ "$CONVERTED" = true ]; then
+              # فایل‌های رسانه‌ای: ذخیره بدون فشرده‌سازی
+              if [ "$CONVERTED" = true ]; then
+                echo "📁 فایل MP3 تبدیل شده → ذخیره بدون فشرده‌سازی"
+              else
+                echo "📁 فایل رسانه‌ای → ذخیره بدون فشرده‌سازی"
+              fi
               
               TARGET_NAME="$FINAL_NAME"
               COUNTER=1
@@ -327,34 +328,25 @@ jobs:
           echo "## ℹ️ اطلاعات" >> "$FINAL_DIR/README.md"
           echo "" >> "$FINAL_DIR/README.md"
           echo "- **تاریخ دان/لود:** ${CURRENT_DATE}" >> "$FINAL_DIR/README.md"
-          echo "- **سطح فشرده‌سازی 7z:** ${{ github.event.inputs.compression_level }}" >> "$FINAL_DIR/README.md"
           
           if [ "$AUDIO_BITRATE" != "none" ]; then
-            echo "- **بیت‌ریت صوتی:** ${AUDIO_BITRATE} (تبدیل به MP3)" >> "$FINAL_DIR/README.md"
+            echo "- **بیت‌ریت صوتی:** ${AUDIO_BITRATE}" >> "$FINAL_DIR/README.md"
           fi
           
           if [ -n "$PASSWORD_SET" ]; then
             echo "- **رمزگذاری:** فعال (فقط برای فایل‌های غیر رسانه‌ای)" >> "$FINAL_DIR/README.md"
-          else
-            echo "- **رمزگذاری:** غیرفعال" >> "$FINAL_DIR/README.md"
           fi
           
           echo "" >> "$FINAL_DIR/README.md"
           echo "## 📂 نحوه استفاده" >> "$FINAL_DIR/README.md"
           echo "" >> "$FINAL_DIR/README.md"
           echo "1. فایل‌ها را دان/لود کنید" >> "$FINAL_DIR/README.md"
-          echo "2. فایل‌های با پسوند .7z را با 7-Zip استخراج کنید" >> "$FINAL_DIR/README.md"
-          echo "3. فایل‌های رسانه‌ای (MP3، MP4، تصاویر) بدون نیاز به استخراج قابل استفاده هستند" >> "$FINAL_DIR/README.md"
+          echo "2. فایل‌های رسانه‌ای (MP3، MP4، تصاویر) بدون نیاز به استخراج قابل استفاده هستند" >> "$FINAL_DIR/README.md"
           echo "" >> "$FINAL_DIR/README.md"
           echo "---" >> "$FINAL_DIR/README.md"
           echo "*تولید شده توسط GitHub Actions*" >> "$FINAL_DIR/README.md"
           
-          if [ -f "$FINAL_DIR/README.md" ]; then
-            echo "✅ README ساخته شد"
-          else
-            echo "❌ خطا: README ساخته نشد"
-            exit 1
-          fi
+          echo "✅ README ساخته شد"
 
       - name: کامیت و انتشار
         run: |
